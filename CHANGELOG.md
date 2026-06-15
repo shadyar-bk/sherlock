@@ -1,5 +1,11 @@
 # Sherlock
 
+## 2.3.0
+
+### Minor Changes
+
+- 445b4ea: Remove the bundled inlang submodule and use published inlang npm packages instead. Machine translation support has been removed because it depended on unpublished inlang RPC packages, and the contributor setup now uses normal `pnpm install`, `pnpm run build`, and `pnpm test` flows.
+
 ## 2.2.0
 
 ### Minor Changes
