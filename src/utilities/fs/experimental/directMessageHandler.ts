@@ -23,7 +23,6 @@ const fileMessageKeys = new Map<string, Set<string>>()
 const DEBOUNCE_MS = 150 // Reduced debounce time for faster updates
 const processingFiles = new Set<string>() // Prevent concurrent processing of the same file
 const lastFileUpdateTime = new Map<string, number>() // Track when files were last processed
-const FILE_UPDATE_COOLDOWN_MS = 1000 // Reduced cooldown to make the editor more responsive
 let isInEventLoop = false // Global flag to detect event loops
 let lastUIUpdateTime = 0 // Track when we last fired UI update events
 const MIN_UI_UPDATE_INTERVAL_MS = 300 // Minimum time between UI updates to prevent UI lag
@@ -161,6 +160,13 @@ export async function setupDirectMessageWatcher(args: {
 
 		console.log("Created message watcher for pattern: **/messages/*.json")
 
+		const messageFiles = await vscode.workspace.findFiles(messagePattern)
+		for (const uri of messageFiles) {
+			const filePath = uri.fsPath
+			fileHashes.set(filePath, await getFileHash(uri))
+			fileMessageKeys.set(filePath, await extractMessageKeys(uri))
+		}
+
 		// Create debounced handler for message file events
 		const debouncedHandleMessageEvent = debounce(async (uri: vscode.Uri, eventType: string) => {
 			const filePath = uri.fsPath
@@ -171,19 +177,9 @@ export async function setupDirectMessageWatcher(args: {
 				return
 			}
 
-			// Check cooldown period to prevent rapid-fire updates to the same file
-			const now = Date.now()
-			const lastUpdate = lastFileUpdateTime.get(filePath) || 0
-			if (now - lastUpdate < FILE_UPDATE_COOLDOWN_MS) {
-				console.log(
-					`File ${filePath} was updated too recently, skipping (cooldown: ${FILE_UPDATE_COOLDOWN_MS}ms)`
-				)
-				return
-			}
-
-			// Check if we're in an event loop
-			if (isInEventLoop) {
-				console.log("Detected potential event loop, breaking the cycle")
+				// Check if we're in an event loop
+				if (isInEventLoop) {
+					console.log("Detected potential event loop, breaking the cycle")
 				return
 			}
 
@@ -230,10 +226,12 @@ export async function setupDirectMessageWatcher(args: {
 					return
 				}
 
-				// Get current plugins and find message format plugin
+				// Get current plugins and find a JSON-capable message import plugin
 				const currentPlugins = await currentProject.plugins.get()
 				const messageFormatPlugin = currentPlugins.find((p) =>
-					(p.key || p.id || "").toLowerCase().includes("messageformat")
+					["messageformat", "json"].some((pluginName) =>
+						(p.key || p.id || "").toLowerCase().includes(pluginName)
+					)
 				)
 
 				if (!messageFormatPlugin) {
@@ -252,8 +250,8 @@ export async function setupDirectMessageWatcher(args: {
 				if (eventType !== "Deleted") {
 					// Extract current message keys from file
 					const currentKeys = await extractMessageKeys(uri)
-					// Get previously known keys (if any)
-					const previousKeys = fileMessageKeys.get(filePath) || new Set()
+					// Deletions are only safe to infer from a previous snapshot of this file.
+					const previousKeys = fileMessageKeys.get(filePath) ?? new Set()
 
 					// Find keys that have been deleted (present in previous but not in current)
 					const deletedKeys = new Set([...previousKeys].filter((key) => !currentKeys.has(key)))
@@ -317,7 +315,7 @@ export async function setupDirectMessageWatcher(args: {
 					console.log(`File deleted: ${filePath} - handling deletion for locale ${locale}`)
 
 					// When a file is deleted, all its messages should be removed for that locale
-					const previousKeys = fileMessageKeys.get(filePath) || new Set()
+					const previousKeys = fileMessageKeys.get(filePath) ?? new Set()
 
 					if (previousKeys.size > 0) {
 						// Track if we've made changes to update the UI

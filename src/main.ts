@@ -22,6 +22,8 @@ import { linterDiagnostics } from "./diagnostics/linterDiagnostics.js"
 import { setupDirectMessageWatcher } from "./utilities/fs/experimental/directMessageHandler.js"
 //import { initErrorMonitoring } from "./services/error-monitoring/implementation.js"
 
+const messageFileSnapshots = new Map<string, Set<string>>()
+
 // Entry Point
 export async function activate(
 	context: vscode.ExtensionContext
@@ -99,11 +101,12 @@ export async function main(args: {
 		// Set up both file system watchers
 		// setupFileSystemWatcher(args)
 
-		// Set up direct message watcher as a fallback
-		setupDirectMessageWatcher({
-			context: args.context,
-			workspaceFolder: args.workspaceFolder,
-		})
+			// Set up direct message watcher as a fallback
+			await seedMessageFileSnapshots()
+			await setupDirectMessageWatcher({
+				context: args.context,
+				workspaceFolder: args.workspaceFolder,
+			})
 
 		return
 	} else {
@@ -173,6 +176,8 @@ async function setProjects(args: { workspaceFolder: vscode.WorkspaceFolder }) {
 export async function saveProject() {
 	try {
 		if (state().selectedProjectPath && state().project) {
+			await removeMessagesDeletedFromJsonFiles()
+
 			await saveProjectToDirectory({
 				fs: createFileSystemMapper(state().selectedProjectPath, fs),
 				project: state().project,
@@ -181,5 +186,126 @@ export async function saveProject() {
 		}
 	} catch (error) {
 		handleError(error)
+	}
+}
+
+async function removeMessagesDeletedFromJsonFiles() {
+	const project = state().project
+	const selectedProjectPath = state().selectedProjectPath
+	if (!project || !selectedProjectPath) return
+
+	const settings = await project.settings.get()
+	const baseLocale = settings.baseLocale ?? settings.locales[0]
+	const pathPattern = getJsonPathPattern(settings)
+	if (!pathPattern || !baseLocale) return
+
+	for (const locale of settings.locales) {
+		const messageFilePath = getMessageFilePath(selectedProjectPath, pathPattern, locale)
+		const currentKeys = await readMessageFileKeys(messageFilePath)
+		if (!currentKeys) continue
+
+		const previousKeys = messageFileSnapshots.get(messageFilePath)
+		if (!previousKeys) {
+			messageFileSnapshots.set(messageFilePath, currentKeys)
+			continue
+		}
+
+		const deletedKeys = [...previousKeys].filter((key) => !currentKeys.has(key))
+		for (const key of deletedKeys) {
+			if (locale === baseLocale) {
+				await deleteBundleMessages(key)
+			} else {
+				await deleteLocaleMessage(key, locale)
+			}
+		}
+
+		messageFileSnapshots.set(messageFilePath, currentKeys)
+	}
+
+	async function deleteBundleMessages(bundleId: string) {
+		const messages = await project.db
+			.selectFrom("message")
+			.select("id")
+			.where("bundleId", "=", bundleId)
+			.execute()
+
+		for (const message of messages) {
+			await project.db.deleteFrom("variant").where("messageId", "=", message.id).execute()
+		}
+
+		await project.db.deleteFrom("message").where("bundleId", "=", bundleId).execute()
+		await project.db.deleteFrom("bundle").where("id", "=", bundleId).execute()
+	}
+
+	async function deleteLocaleMessage(bundleId: string, locale: string) {
+		const messages = await project.db
+			.selectFrom("message")
+			.select("id")
+			.where("bundleId", "=", bundleId)
+			.where("locale", "=", locale)
+			.execute()
+
+		for (const message of messages) {
+			await project.db.deleteFrom("variant").where("messageId", "=", message.id).execute()
+		}
+
+		await project.db
+			.deleteFrom("message")
+			.where("bundleId", "=", bundleId)
+			.where("locale", "=", locale)
+			.execute()
+
+		const remainingMessages = await project.db
+			.selectFrom("message")
+			.select("id")
+			.where("bundleId", "=", bundleId)
+			.execute()
+
+		if (remainingMessages.length === 0) {
+			await project.db.deleteFrom("bundle").where("id", "=", bundleId).execute()
+		}
+	}
+}
+
+async function seedMessageFileSnapshots() {
+	const project = state().project
+	const selectedProjectPath = state().selectedProjectPath
+	if (!project || !selectedProjectPath) return
+
+	const settings = await project.settings.get()
+	const pathPattern = getJsonPathPattern(settings)
+	if (!pathPattern) return
+
+	for (const locale of settings.locales) {
+		const messageFilePath = getMessageFilePath(selectedProjectPath, pathPattern, locale)
+		const keys = await readMessageFileKeys(messageFilePath)
+		if (keys) {
+			messageFileSnapshots.set(messageFilePath, keys)
+		}
+	}
+}
+
+function getJsonPathPattern(settings: Awaited<ReturnType<NonNullable<typeof state>["project"]["settings"]["get"]>>) {
+	const pathPattern =
+		(settings as any)["plugin.inlang.json"]?.pathPattern ??
+		(settings as any)["plugin.inlang.messageFormat"]?.pathPattern
+
+	return typeof pathPattern === "string" ? pathPattern : undefined
+}
+
+function getMessageFilePath(selectedProjectPath: string, pathPattern: string, locale: string) {
+	const projectDirectory = path.dirname(selectedProjectPath)
+	return path.resolve(
+		projectDirectory,
+		pathPattern.replace("{languageTag}", locale).replace("{locale}", locale)
+	)
+}
+
+async function readMessageFileKeys(messageFilePath: string) {
+	try {
+		const file = JSON.parse(await fs.readFile(messageFilePath, "utf8"))
+		return new Set(Object.keys(file).filter((key) => key !== "$schema"))
+	} catch {
+		return undefined
 	}
 }
