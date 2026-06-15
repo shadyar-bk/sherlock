@@ -1,7 +1,5 @@
 import type { InlangDatabaseSchema } from "@inlang/sdk"
-import { getSelectedBundleByBundleIdOrAlias } from "../../helper.js"
 import { msg } from "../../messages/msg.js"
-import { state } from "../../state.js"
 import type { UpdateBundleMessage } from "../editorView.js"
 import type { Kysely } from "kysely"
 
@@ -26,7 +24,8 @@ export async function handleUpdateBundle({
 		}
 
 		if (change.newData) {
-			db.insertInto(change.entity)
+			await db
+				.insertInto(change.entity)
 				.values({
 					...change.newData,
 					// @ts-expect-error - we need to remove the nesting

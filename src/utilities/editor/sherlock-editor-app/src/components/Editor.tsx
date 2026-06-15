@@ -65,9 +65,17 @@ const Editor: React.FC<{
 	bundle: BundleNested
 	settings: ProjectSettings
 }> = ({ bundle, settings }) => {
-	const handleChangeEvent = (e: Event) => {
+	const handleChangeEvent = (e: Event, persist = false) => {
 		const change = (e as CustomEvent).detail as ChangeEventDetail
-		vscode.postMessage({ command: "change", change })
+		vscode.postMessage({ command: "change", change, persist })
+	}
+
+	const handleStructuralChangeEvent = (e: Event) => {
+		handleChangeEvent(e, true)
+	}
+
+	const handlePersistEdit = () => {
+		vscode.postMessage({ command: "persist-edit" })
 	}
 
 	const handleDelete = ({
@@ -112,7 +120,11 @@ const Editor: React.FC<{
 							>
 								{message.variants.map((variant) => (
 									<ReactInlangVariant key={variant.id} slot="variant" variant={variant}>
-										<ReactInlangPatternEditor slot="pattern-editor" variant={variant} />
+										<ReactInlangPatternEditor
+											slot="pattern-editor"
+											variant={variant}
+											onPatternEditorBlur={handlePersistEdit}
+										/>
 										<SlDropdown
 											slot="variant-action"
 											className="animate-blendIn"
@@ -243,7 +255,7 @@ const Editor: React.FC<{
 				label="Add selector"
 			>
 				<ReactInlangAddSelector
-					change={handleChangeEvent}
+					change={handleStructuralChangeEvent}
 					onSubmit={() => {
 						const dialog = document.getElementById(
 							`selector-button-dialog-${bundle.id}`
