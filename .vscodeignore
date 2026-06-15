@@ -1,5 +1,7 @@
 .vscode/**
 .vscode-test/**
+.github/**
+.changeset/**
 src/**
 .gitignore
 .yarnrc
@@ -9,8 +11,12 @@ src/**
 **/*.ts
 .wdio-vscode-service
 test
+docs/**
 submodule/**
-.gitmodules
+build.js
+publish-openvsx.js
+pnpm-lock.yaml
+pnpm-workspace.yaml
 
 node_modules/**
 examples/**

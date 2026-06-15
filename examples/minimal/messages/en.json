@@ -1,0 +1,5 @@
+{
+	"hello_world": "Hello world",
+	"welcome_user": "Welcome, {name}!",
+	"missing_in_german": "This message is intentionally missing in German"
+}

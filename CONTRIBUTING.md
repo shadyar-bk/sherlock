@@ -8,14 +8,13 @@ This extension ships for multiple platforms (Windows/macOS/Linux), so please tes
 
 - Node.js 22
 - pnpm
-- Git submodules enabled
 
 ### Setup
 
-1. Clone with submodules: `git clone --recurse-submodules git@github.com:opral/sherlock.git`
+1. Clone the repository: `git clone git@github.com:opral/sherlock.git`
 2. Install dependencies: `pnpm install`
-3. Build the inlang dependencies: `pnpm run build:inlang`
-4. Build Sherlock: `pnpm run build`
+3. Build Sherlock: `pnpm run build`
+4. Run tests: `pnpm test`
 
 ### Development
 

@@ -6,5 +6,10 @@
 
 node_modules
 .DS_Store
+*.vsix
+**/*.inlang/.gitignore
+**/*.inlang/.meta.json
+**/*.inlang/README.md
+**/*.inlang/cache/
 
 /dist

@@ -185,7 +185,8 @@ describe("Message Webview Provider Tests", () => {
 		expect(html).toContain("<button onclick=\"openEditorView('message-id')\">Hello</button>")
 		expect(html).toContain('<span class="languageTag"><strong>de</strong></span>')
 		expect(html).toContain("[missing]")
-		expect(html).toContain("codicon-sparkle") // Machine translation button
+		expect(html).not.toContain("codicon-sparkle")
+		expect(html).toContain("codicon-edit")
 	})
 
 	it("should handle cases where there are no translations", async () => {

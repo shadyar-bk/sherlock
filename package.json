@@ -12,7 +12,7 @@
 	"icon": "assets/sherlock-logo.png",
 	"version": "2.2.0",
 	"engines": {
-		"vscode": "^1.84.2"
+		"vscode": "^1.90.0"
 	},
 	"keywords": [
 		"i18n",
@@ -253,10 +253,7 @@
 	},
 	"scripts": {
 		"build": "pnpm run editor:build && node ./build.js",
-		"prebuild": "pnpm run build:inlang",
-		"postinstall": "pnpm -C submodule/inlang install",
 		"dev": "DEV=true node ./build.js",
-		"build:inlang": "pnpm -C submodule/inlang install && pnpm -C submodule/inlang exec nx run-many --nx-bail --target=build --projects=@inlang/sdk,@inlang/editor-component,@inlang/rpc,@inlang/recommend-sherlock",
 		"package": "pnpm vsce package --no-dependencies",
 		"publish": "pnpm vsce publish --no-dependencies",
 		"publish:open-vsx": "node --experimental-json-modules publish-openvsx.js",
@@ -279,16 +276,15 @@
 	},
 	"dependencies": {
 		"@eliaspourquoi/sqlite-node-wasm": "3.46.0-build2",
-		"@inlang/editor-component": "workspace:*",
-		"@inlang/recommend-sherlock": "workspace:*",
-		"@inlang/rpc": "workspace:*",
-		"@inlang/sdk": "workspace:*",
-		"@inlang/settings-component": "workspace:*",
+		"@inlang/editor-component": "10.0.0",
+		"@inlang/recommend-sherlock": "0.2.1",
+		"@inlang/sdk": "2.10.0",
+		"@inlang/settings-component": "5.0.0",
 		"@vitest/coverage-v8": "^3.2.4",
 		"comlink": "^4.4.1",
 		"fast-glob": "^3.2.12",
 		"https-proxy-agent": "7.0.2",
-		"kysely": "^0.27.4",
+		"kysely": "^0.28.12",
 		"lit-html": "^3.1.2",
 		"lodash-es": "^4.17.21",
 		"nanoid": "^5.1.5",
@@ -300,7 +296,6 @@
 	},
 	"devDependencies": {
 		"@changesets/cli": "^2.29.8",
-		"@inlang/tsconfig": "workspace:*",
 		"@sentry/node": "^7.99.0",
 		"@types/fs-extra": "^11.0.2",
 		"@types/glob": "^8.1.0",
@@ -310,7 +305,7 @@
 		"@types/require-from-string": "^1.2.1",
 		"@types/throttle-debounce": "^5.0.2",
 		"@types/ungap__structured-clone": "^0.3.3",
-		"@types/vscode": "^1.84.2",
+		"@types/vscode": "1.90.0",
 		"@vscode/vsce": "^3.2.2",
 		"@wdio/cli": "^8.24.6",
 		"@wdio/globals": "^8.24.6",
