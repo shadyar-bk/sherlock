@@ -1,0 +1,24 @@
+{
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"name": "Run Extension",
+			"type": "extensionHost",
+			"request": "launch",
+			"preLaunchTask": "pnpm: build",
+			"args": [
+				"--extensionDevelopmentPath=${workspaceFolder}",
+				"${input:extensionHostWorkspace}"
+			],
+			"outFiles": ["${workspaceFolder}/dist/**/*.cjs"]
+		}
+	],
+	"inputs": [
+		{
+			"id": "extensionHostWorkspace",
+			"type": "promptString",
+			"description": "Workspace to open in the Extension Development Host",
+			"default": "${workspaceFolder}/examples/minimal"
+		}
+	]
+}

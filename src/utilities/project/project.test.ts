@@ -312,7 +312,7 @@ describe("createTreeDataProvider", () => {
 
 describe("projectView", () => {
 	it("should set up the project view", async () => {
-		const context = { subscriptions: [] } as vscode.ExtensionContext
+		const context = { subscriptions: [] } as unknown as vscode.ExtensionContext
 		const workspaceFolder = {
 			uri: {
 				fsPath: "/path/to/workspace",

@@ -15,7 +15,6 @@ type ContextTableRow = {
 	bundleId: string
 	editCommand?: Uri
 	openInFinkCommand?: Uri
-	machineTranslateCommand?: Uri
 }
 
 function renderTranslationRow(row: ContextTableRow) {
@@ -23,15 +22,7 @@ function renderTranslationRow(row: ContextTableRow) {
 		? `<a href="${row.openInFinkCommand}">$(link-external)</a>`
 		: ""
 
-	// Decide between machine translate and edit command based on the message
-	let actionCommandLink
-	if (row.message === MISSING_TRANSLATION_MESSAGE) {
-		actionCommandLink = row.machineTranslateCommand
-			? `<a href="${row.machineTranslateCommand}" title="Translate message with Inlang AI">$(sparkle)</a>`
-			: ""
-	} else {
-		actionCommandLink = row.editCommand ? `<a href="${row.editCommand}">$(edit)</a>` : ""
-	}
+	const actionCommandLink = row.editCommand ? `<a href="${row.editCommand}">$(edit)</a>` : ""
 
 	const messageListing = `<td><strong>${escapeHtml(row.locale)}&nbsp;</strong></td><td>${escapeHtml(
 		row.message
@@ -91,16 +82,6 @@ export async function contextTooltip(
 					encodeURIComponent(JSON.stringify({ bundleId: referenceMessage.bundleId }))
 				)
 			)
-			const machineTranslateCommand = Uri.parse(
-				INTERPOLATE.COMMAND_URI(
-					"MACHINE_TRANSLATE_MESSAGE",
-					JSON.stringify({
-						bundleId: referenceMessage.bundleId,
-						baseLocale: (await state().project.settings.get())?.baseLocale,
-						targetLocales: [locale],
-					})
-				)
-			)
 			// const openInFinkCommand = Uri.parse(
 			// 	INTERPOLATE.COMMAND_URI(
 			// 		"OPEN_IN_FINK",
@@ -114,7 +95,6 @@ export async function contextTooltip(
 				bundleId: referenceMessage.bundleId,
 				editCommand,
 				// openInFinkCommand,
-				machineTranslateCommand,
 			}
 		})
 	)

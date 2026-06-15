@@ -338,15 +338,8 @@ export function createMessageWebviewProvider(args: {
 			)
 
 			args.context.subscriptions.push(
-				CONFIGURATION.EVENTS.ON_DID_EDIT_MESSAGE.event((payload) => {
-					if (payload?.origin && payload.origin.startsWith("editor")) {
-						logger.debug(
-							"ON_DID_EDIT_MESSAGE event originated from editor; skipping immediate refresh",
-							payload
-						)
-						return
-					}
-					logger.debug("ON_DID_EDIT_MESSAGE event triggered - forcing immediate refresh", payload)
+				CONFIGURATION.EVENTS.ON_DID_EDIT_MESSAGE.event(() => {
+					logger.debug("ON_DID_EDIT_MESSAGE event triggered - forcing immediate refresh")
 					// Use our special forced refresh that bypasses throttling and always updates
 					forceMessageRefresh()
 				})
@@ -586,13 +579,6 @@ export function getHtml(args: { mainContent: string; webview: vscode.Webview }):
 					});
 				}
 
-				function machineTranslate(bundleId, baseLocale, targetLanguageTags) {
-					vscode.postMessage({
-						command: 'executeCommand',
-						commandName: 'sherlock.machineTranslateMessage',
-						commandArgs: { bundleId, baseLocale, targetLanguageTags },
-					});
-				}
             </script>
         </body>
         </html>
@@ -618,16 +604,12 @@ export async function getTranslationsTableHtml(args: {
 		if (!message) {
 			const missingTranslationMessage = CONFIGURATION.STRINGS.MISSING_TRANSLATION_MESSAGE
 			const editCommand = `openEditorView('${args.bundle.id}')`
-			const machineTranslateCommand = `machineTranslate('${args.bundle.id}', '${
-				settings.baseLocale
-			}', ['${locale}'])`
 
 			return `
 				<div class="section">
 					<span class="languageTag"><strong>${escapeHtml(locale)}</strong></span>
 					<span class="message"><button onclick="${editCommand}">${escapeHtml(missingTranslationMessage)}</button></span>
 					<span class="actionButtons">
-						<!--<button title="Translate message with Inlang AI" onclick="${machineTranslateCommand}"><span class="codicon codicon-sparkle"></span></button>-->
 						<button title="Edit" onclick="${editCommand}"><span class="codicon codicon-edit"></span></button>
 					</span>
 				</div>

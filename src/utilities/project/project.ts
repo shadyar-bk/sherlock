@@ -111,7 +111,6 @@ export async function handleTreeSelection(args: {
 		const inlangProject = await loadProjectFromDirectory({
 			path: newSelectedProject,
 			fs,
-			appId: CONFIGURATION.STRINGS.APP_ID,
 		})
 
 		setState({

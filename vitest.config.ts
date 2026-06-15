@@ -5,7 +5,6 @@ export default defineConfig({
 		exclude: [
 			...configDefaults.exclude,
 			"**/*.e2e.test.ts",
-			"submodule/**",
 		],
 		server: {
 			deps: {

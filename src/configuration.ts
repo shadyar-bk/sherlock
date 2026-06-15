@@ -10,7 +10,6 @@ import type { ErrorNode } from "./utilities/errors/errors.js"
 import { copyErrorCommand } from "./commands/copyError.js"
 import { previewLocaleCommand } from "./commands/previewLocaleCommand.js"
 import { jumpToPositionCommand } from "./commands/jumpToPosition.js"
-import { machineTranslateMessageCommand } from "./commands/machineTranslate.js"
 import { openSettingsViewCommand } from "./commands/openSettingsView.js"
 import { toggleInlineAnnotationsCommand } from "./commands/toggleInlineAnnotation.js"
 import { openEditorViewCommand } from "./commands/openEditorView.js"
@@ -40,7 +39,6 @@ export const CONFIGURATION = {
 		OPEN_SETTINGS_VIEW: openSettingsViewCommand,
 		OPEN_EDITOR_VIEW: openEditorViewCommand,
 		COPY_ERROR: copyErrorCommand,
-		MACHINE_TRANSLATE_MESSAGE: machineTranslateMessageCommand,
 		TOGGLE_INLINE_ANNOTATIONS: toggleInlineAnnotationsCommand,
 		RELOAD_PROJECT: reloadProjectCommand,
 	},

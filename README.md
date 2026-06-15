@@ -54,7 +54,10 @@ You can use the following template when using JSON files as translation files. I
 	// all the language tags you want to support in your project
 	"locales": ["en", "de"],
 	"modules": ["https://cdn.jsdelivr.net/npm/@inlang/plugin-json@4/dist/index.js"], // or use another storage module: https://inlang.com/c/plugins (i18next, json, inlang message format)
-	"settings": {}
+	"plugin.inlang.json": {
+		"pathPattern": "./messages/{languageTag}.json",
+		"variableReferencePattern": ["{", "}"]
+	}
 }
 ```
 
@@ -263,14 +266,14 @@ If something isn't working as expected or you have a feature suggestion, please 
 
 # Development
 
-This repository contains the standalone Sherlock VS Code extension. It vendors inlang as a submodule in `submodule/inlang`.
+This repository contains the standalone Sherlock VS Code extension.
 
 ## Setup
 
-1. Clone with submodules: `git clone --recurse-submodules git@github.com:opral/sherlock.git`
+1. Clone the repository: `git clone git@github.com:opral/sherlock.git`
 2. Install dependencies: `pnpm install`
-3. Build inlang deps: `pnpm run build:inlang`
-4. Build Sherlock: `pnpm run build`
+3. Build Sherlock: `pnpm run build`
+4. Run tests: `pnpm test`
 
 ## Useful scripts
 

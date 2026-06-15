@@ -19,8 +19,6 @@ jobs:
     steps:
       - name: Checkout project
         uses: actions/checkout@v4
-        with:
-          submodules: true
 
       - name: Setup Pnpm
         uses: pnpm/action-setup@v4
