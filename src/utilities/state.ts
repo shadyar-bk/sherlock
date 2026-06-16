@@ -26,6 +26,21 @@ export function setState(state: State) {
 }
 
 /**
+ * Updates the list of projects discovered in the workspace.
+ *
+ * Project discovery runs before a project is loaded, so this can be the first
+ * state written during extension startup.
+ */
+export function setProjectsInWorkspace(projectsInWorkspace: State["projectsInWorkspace"]) {
+	_state = {
+		..._state,
+		projectsInWorkspace,
+	}
+
+	if (_state.project) proxyPluginGetMethod(_state.project)
+}
+
+/**
  * Returns the current state.
  *
  * The state is a function because importing a variable

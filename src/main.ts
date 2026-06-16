@@ -2,7 +2,7 @@ import * as vscode from "vscode"
 import { handleError } from "./utilities/utils.js"
 import { CONFIGURATION } from "./configuration.js"
 import { projectView } from "./utilities/project/project.js"
-import { setState, state } from "./utilities/state.js"
+import { setProjectsInWorkspace, setState, state } from "./utilities/state.js"
 import { messagePreview } from "./decorations/messagePreview.js"
 import { ExtractMessage } from "./actions/extractMessage.js"
 import { errorView } from "./utilities/errors/errors.js"
@@ -162,27 +162,30 @@ async function handleInlangErrors() {
 	}
 }
 
-async function setProjects(args: { workspaceFolder: vscode.WorkspaceFolder }) {
+export async function discoverProjectsInWorkspace(args: {
+	workspaceFolder: vscode.WorkspaceFolder
+}): Promise<Array<{ projectPath: string }>> {
 	try {
 		const workspacePath = fg.convertPathToPattern(args.workspaceFolder.uri.fsPath) // Normalize path
-		const projectsList = (
+		return (
 			await fg.async(`${workspacePath}/**/*.inlang`, {
 				onlyDirectories: true,
 				ignore: ["**/node_modules/**"],
 				absolute: true, // Ensures paths are absolute and properly formatted
 				cwd: workspacePath, // Makes it platform-agnostic
+				suppressErrors: true,
 			})
 		).map((project) => ({
 			projectPath: project,
 		}))
-
-		setState({
-			...state(),
-			projectsInWorkspace: projectsList,
-		})
 	} catch (error) {
 		handleError(error)
+		return []
 	}
+}
+
+async function setProjects(args: { workspaceFolder: vscode.WorkspaceFolder }) {
+	setProjectsInWorkspace(await discoverProjectsInWorkspace(args))
 }
 
 export async function saveProject() {
