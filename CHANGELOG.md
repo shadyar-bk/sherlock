@@ -1,5 +1,12 @@
 # Sherlock
 
+## 2.3.2
+
+### Patch Changes
+
+- 9437fe0: Handle unreadable workspace folders during project discovery.
+- b3e6256: Update the inlang editor component so RTL locales keep editor actions aligned while preserving RTL text direction.
+
 ## 2.3.1
 
 ### Patch Changes
