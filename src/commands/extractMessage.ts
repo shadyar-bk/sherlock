@@ -85,11 +85,19 @@ export const extractMessageCommand = {
 					bundleId,
 					selection: formattedSelection,
 				})
-
-				if (acc.includes(formattedOption)) {
+				if (!formattedOption?.bundleId || !formattedOption.messageReplacement) {
 					return acc
 				}
-				return [...acc, formattedOption]
+				const normalizedOption = normalizeDottedKeyReplacement(formattedOption)
+
+				if (
+					acc.some(
+						({ messageReplacement }) => messageReplacement === normalizedOption.messageReplacement
+					)
+				) {
+					return acc
+				}
+				return [...acc, normalizedOption]
 			},
 			[] as { bundleId: string; messageReplacement: string }[]
 		)
@@ -160,4 +168,28 @@ export const extractMessageCommand = {
 			return window.showErrorMessage(`Couldn't extract new message. ${e}`)
 		}
 	},
+}
+
+export function normalizeDottedKeyReplacement(option: {
+	bundleId: string
+	messageReplacement: string
+}) {
+	if (!option.bundleId.includes(".")) {
+		return option
+	}
+
+	const escapedParaglideIdentifier = escapeRegExp(option.bundleId.replaceAll(".", "_"))
+	const messageReplacement = option.messageReplacement.replace(
+		new RegExp(`\\bm\\.${escapedParaglideIdentifier}(?=\\s*\\()`, "g"),
+		`m[${JSON.stringify(option.bundleId)}]`
+	)
+
+	return {
+		...option,
+		messageReplacement,
+	}
+}
+
+function escapeRegExp(value: string) {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
