@@ -1,9 +1,22 @@
 import type { Options } from "@wdio/types"
+import fs from "node:fs"
+import os from "node:os"
 import url from "node:url"
 import path from "node:path"
 
 const debug = process.env.DEBUG
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url))
+const fixtureWorkspacePath = path.join(__dirname, "../examples/minimal")
+const providedWorkspacePath = process.env.SHERLOCK_E2E_WORKSPACE
+const tempWorkspaceRoot = providedWorkspacePath
+	? undefined
+	: fs.mkdtempSync(path.join(os.tmpdir(), "sherlock-e2e-"))
+const e2eWorkspacePath = providedWorkspacePath ?? path.join(tempWorkspaceRoot!, "minimal")
+
+if (!providedWorkspacePath) {
+	fs.cpSync(fixtureWorkspacePath, e2eWorkspacePath, { recursive: true })
+	process.env.SHERLOCK_E2E_WORKSPACE = e2eWorkspacePath
+}
 
 export const config: Options.Testrunner = {
 	//
@@ -58,7 +71,7 @@ export const config: Options.Testrunner = {
 	// and 30 processes will get spawned. The property handles how many capabilities
 	// from the same test should run tests.
 	//
-	maxInstances: debug ? 1 : 10,
+	maxInstances: 1,
 	//
 	// If you have trouble getting all important capabilities together, check out the
 	// Sauce Labs platform configurator - a great tool to configure your capabilities:
@@ -67,12 +80,12 @@ export const config: Options.Testrunner = {
 	capabilities: [
 		{
 			browserName: "vscode",
-			browserVersion: "1.86.2", // also possible: "insiders", "stable" or a specific version e.g. "1.80.0"
+			browserVersion: "stable", // also possible: "insiders" or a specific version e.g. "1.80.0"
 			"wdio:vscodeOptions": {
 				verboseLogging: false,
 				// points to directory where extension package.json is located
 				extensionPath: path.join(__dirname, ".."),
-				workspacePath: path.join(__dirname, "../../../development-projects/inlang-nextjs"),
+				workspacePath: e2eWorkspacePath,
 				// optional VS Code settings
 				userSettings: {
 					"editor.fontSize": 14,
@@ -299,6 +312,11 @@ export const config: Options.Testrunner = {
 	 */
 	// onComplete: function(exitCode, config, capabilities, results) {
 	// },
+	onComplete: function () {
+		if (tempWorkspaceRoot) {
+			fs.rmSync(tempWorkspaceRoot, { recursive: true, force: true })
+		}
+	},
 	/**
 	 * Gets executed when a refresh happens.
 	 * @param {string} oldSessionId session ID of the old session

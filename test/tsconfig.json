@@ -1,5 +1,5 @@
 {
-	"include": ["./spec/**/*.e2e.test.ts", "./wdio.conf.ts"],
+	"include": ["./specs/**/*.e2e.test.ts", "./wdio.conf.ts"],
 	"compilerOptions": {
 		"module": "ESNext",
 		"types": [
@@ -12,6 +12,7 @@
 		"target": "es2022",
 		"moduleResolution": "node",
 		"esModuleInterop": true,
+		"skipLibCheck": true,
 		"experimentalDecorators": true
 	}
 }

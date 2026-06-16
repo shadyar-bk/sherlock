@@ -18,6 +18,7 @@ import { saveProject } from "../../main.js"
 export interface UpdateBundleMessage {
 	command: string
 	change: ChangeEventDetail
+	persist?: boolean
 }
 
 /**
@@ -39,6 +40,7 @@ export function editorView(args: { context: vscode.ExtensionContext; initialBund
 	let panel: WebviewPanel | undefined
 	let disposables: Disposable[] = []
 	let bundleId = initialBundleId
+	let pendingUpdate = Promise.resolve()
 
 	/**
 	 * Opens a new panel if none is open, otherwise reveals the existing one.
@@ -64,6 +66,7 @@ export function editorView(args: { context: vscode.ExtensionContext; initialBund
 		// Set up disposal
 		panel.onDidDispose(
 			() => {
+				void persistEdit()
 				dispose()
 				panel = undefined
 			},
@@ -119,7 +122,7 @@ export function editorView(args: { context: vscode.ExtensionContext; initialBund
 						message: message.message,
 					})
 
-					updateView()
+					await updateView()
 					return
 				case "delete-variant":
 					await deleteVariant({
@@ -127,7 +130,7 @@ export function editorView(args: { context: vscode.ExtensionContext; initialBund
 						variantId: message.id,
 					})
 
-					updateView()
+					await updateView()
 					return
 				case "delete-bundle":
 					await deleteBundleNested({
@@ -135,15 +138,17 @@ export function editorView(args: { context: vscode.ExtensionContext; initialBund
 						bundleId: message.id,
 					})
 
-					updateView()
+					await updateView()
 					return
 				case "change":
-					await handleUpdateBundle({
-						db: state().project?.db,
-						message,
-					})
+					await queueUpdate(message)
 
-					updateView()
+					if (message.persist === true) {
+						await updateView()
+					}
+					return
+				case "persist-edit":
+					await persistEdit()
 					return
 				case "show-info-message":
 					msg(message.message, "info", "statusBar", vscode.StatusBarAlignment.Right, 3000)
@@ -159,10 +164,22 @@ export function editorView(args: { context: vscode.ExtensionContext; initialBund
 		disposables.push(disposable)
 	}
 
+	function queueUpdate(message: UpdateBundleMessage) {
+		pendingUpdate = pendingUpdate.then(() =>
+			handleUpdateBundle({
+				db: state().project?.db,
+				message,
+			})
+		)
+		return pendingUpdate
+	}
+
 	/**
 	 * Update view
 	 */
 	async function updateView() {
+		await pendingUpdate
+
 		CONFIGURATION.EVENTS.ON_DID_EDIT_MESSAGE.fire()
 		CONFIGURATION.EVENTS.ON_DID_EDITOR_VIEW_CHANGE.fire()
 
@@ -173,6 +190,22 @@ export function editorView(args: { context: vscode.ExtensionContext; initialBund
 				settings: await state().project?.settings.get(),
 			},
 		})
+
+		const workspaceFolder = vscode.workspace.workspaceFolders![0]
+		if (workspaceFolder) {
+			try {
+				await saveProject()
+			} catch (error) {
+				console.error("Failed to save project", error)
+				msg(`Failed to save project. ${String(error)}`, "error")
+			}
+		}
+	}
+
+	async function persistEdit() {
+		await pendingUpdate
+
+		CONFIGURATION.EVENTS.ON_DID_EDIT_MESSAGE.fire()
 
 		const workspaceFolder = vscode.workspace.workspaceFolders![0]
 		if (workspaceFolder) {

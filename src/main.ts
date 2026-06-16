@@ -22,6 +22,20 @@ import { linterDiagnostics } from "./diagnostics/linterDiagnostics.js"
 import { setupDirectMessageWatcher } from "./utilities/fs/experimental/directMessageHandler.js"
 //import { initErrorMonitoring } from "./services/error-monitoring/implementation.js"
 
+const messageFileSnapshots = new Map<string, Set<string>>()
+
+type JsonObject = Record<string, unknown>
+type DottedMessageKeySnapshot = {
+	messageFilePath: string
+	locale: string
+	keys: Map<
+		string,
+		{
+			hadNestedPath: boolean
+		}
+	>
+}
+
 // Entry Point
 export async function activate(
 	context: vscode.ExtensionContext
@@ -100,7 +114,8 @@ export async function main(args: {
 		// setupFileSystemWatcher(args)
 
 		// Set up direct message watcher as a fallback
-		setupDirectMessageWatcher({
+		await seedMessageFileSnapshots()
+		await setupDirectMessageWatcher({
 			context: args.context,
 			workspaceFolder: args.workspaceFolder,
 		})
@@ -173,13 +188,290 @@ async function setProjects(args: { workspaceFolder: vscode.WorkspaceFolder }) {
 export async function saveProject() {
 	try {
 		if (state().selectedProjectPath && state().project) {
+			await removeMessagesDeletedFromJsonFiles()
+			const dottedKeySnapshots = await snapshotExplicitDottedMessageKeys()
+
 			await saveProjectToDirectory({
 				fs: createFileSystemMapper(state().selectedProjectPath, fs),
 				project: state().project,
 				path: state().selectedProjectPath,
 			})
+
+			await restoreExplicitDottedMessageKeys(dottedKeySnapshots)
 		}
 	} catch (error) {
 		handleError(error)
 	}
+}
+
+async function snapshotExplicitDottedMessageKeys(): Promise<DottedMessageKeySnapshot[]> {
+	const project = state().project
+	const selectedProjectPath = state().selectedProjectPath
+	if (!project || !selectedProjectPath) return []
+
+	const settings = await project.settings.get()
+	const pathPattern = getJsonPathPattern(settings)
+	if (!pathPattern) return []
+
+	const snapshots: DottedMessageKeySnapshot[] = []
+	for (const locale of settings.locales) {
+		const messageFilePath = getMessageFilePath(selectedProjectPath, pathPattern, locale)
+		const json = await readJsonObject(messageFilePath).catch(() => undefined)
+		if (!json) continue
+
+		const keys = new Map<string, { hadNestedPath: boolean }>()
+		for (const key of Object.keys(json)) {
+			if (key === "$schema" || !key.includes(".")) continue
+			keys.set(key, {
+				hadNestedPath: hasNestedPath(json, key.split(".")),
+			})
+		}
+
+		if (keys.size > 0) {
+			snapshots.push({ messageFilePath, locale, keys })
+		}
+	}
+
+	return snapshots
+}
+
+async function restoreExplicitDottedMessageKeys(snapshots: DottedMessageKeySnapshot[]) {
+	for (const snapshot of snapshots) {
+		const originalContent = await fs
+			.readFile(snapshot.messageFilePath, "utf8")
+			.catch(() => undefined)
+		if (originalContent === undefined) continue
+
+		const json = parseJsonObject(originalContent)
+		if (!json) continue
+
+		let changed = false
+		for (const [key, savedKey] of snapshot.keys) {
+			const exportedValue = getNestedPath(json, key.split("."))
+			if (exportedValue === undefined) {
+				continue
+			}
+
+			if (json[key] !== exportedValue) {
+				json[key] = exportedValue
+				changed = true
+			}
+
+			if (!savedKey.hadNestedPath && deleteNestedPath(json, key.split("."))) {
+				changed = true
+			}
+		}
+
+		if (!changed) continue
+
+		await fs.writeFile(
+			snapshot.messageFilePath,
+			stringifyJsonObject(json, {
+				indent: detectJsonIndent(originalContent),
+				trailingNewline: originalContent.endsWith("\n"),
+			})
+		)
+		messageFileSnapshots.set(
+			snapshot.messageFilePath,
+			new Set(Object.keys(json).filter((key) => key !== "$schema"))
+		)
+	}
+
+}
+
+async function removeMessagesDeletedFromJsonFiles() {
+	const project = state().project
+	const selectedProjectPath = state().selectedProjectPath
+	if (!project || !selectedProjectPath) return
+
+	const settings = await project.settings.get()
+	const baseLocale = settings.baseLocale ?? settings.locales[0]
+	const pathPattern = getJsonPathPattern(settings)
+	if (!pathPattern || !baseLocale) return
+
+	for (const locale of settings.locales) {
+		const messageFilePath = getMessageFilePath(selectedProjectPath, pathPattern, locale)
+		const currentKeys = await readMessageFileKeys(messageFilePath)
+		if (!currentKeys) continue
+
+		const previousKeys = messageFileSnapshots.get(messageFilePath)
+		if (!previousKeys) {
+			messageFileSnapshots.set(messageFilePath, currentKeys)
+			continue
+		}
+
+		const deletedKeys = [...previousKeys].filter((key) => !currentKeys.has(key))
+		for (const key of deletedKeys) {
+			if (locale === baseLocale) {
+				await deleteBundleMessages(key)
+			} else {
+				await deleteLocaleMessage(key, locale)
+			}
+		}
+
+		messageFileSnapshots.set(messageFilePath, currentKeys)
+	}
+
+	async function deleteBundleMessages(bundleId: string) {
+		const messages = await project.db
+			.selectFrom("message")
+			.select("id")
+			.where("bundleId", "=", bundleId)
+			.execute()
+
+		for (const message of messages) {
+			await project.db.deleteFrom("variant").where("messageId", "=", message.id).execute()
+		}
+
+		await project.db.deleteFrom("message").where("bundleId", "=", bundleId).execute()
+		await project.db.deleteFrom("bundle").where("id", "=", bundleId).execute()
+	}
+
+	async function deleteLocaleMessage(bundleId: string, locale: string) {
+		const messages = await project.db
+			.selectFrom("message")
+			.select("id")
+			.where("bundleId", "=", bundleId)
+			.where("locale", "=", locale)
+			.execute()
+
+		for (const message of messages) {
+			await project.db.deleteFrom("variant").where("messageId", "=", message.id).execute()
+		}
+
+		await project.db
+			.deleteFrom("message")
+			.where("bundleId", "=", bundleId)
+			.where("locale", "=", locale)
+			.execute()
+
+		const remainingMessages = await project.db
+			.selectFrom("message")
+			.select("id")
+			.where("bundleId", "=", bundleId)
+			.execute()
+
+		if (remainingMessages.length === 0) {
+			await project.db.deleteFrom("bundle").where("id", "=", bundleId).execute()
+		}
+	}
+}
+
+async function seedMessageFileSnapshots() {
+	const project = state().project
+	const selectedProjectPath = state().selectedProjectPath
+	if (!project || !selectedProjectPath) return
+
+	const settings = await project.settings.get()
+	const pathPattern = getJsonPathPattern(settings)
+	if (!pathPattern) return
+
+	for (const locale of settings.locales) {
+		const messageFilePath = getMessageFilePath(selectedProjectPath, pathPattern, locale)
+		const keys = await readMessageFileKeys(messageFilePath)
+		if (keys) {
+			messageFileSnapshots.set(messageFilePath, keys)
+		}
+	}
+}
+
+function getJsonPathPattern(
+	settings: Awaited<ReturnType<NonNullable<typeof state>["project"]["settings"]["get"]>>
+) {
+	const pathPattern =
+		(settings as any)["plugin.inlang.json"]?.pathPattern ??
+		(settings as any)["plugin.inlang.messageFormat"]?.pathPattern
+
+	return typeof pathPattern === "string" ? pathPattern : undefined
+}
+
+function getMessageFilePath(selectedProjectPath: string, pathPattern: string, locale: string) {
+	const projectDirectory = path.dirname(selectedProjectPath)
+	return path.resolve(
+		projectDirectory,
+		pathPattern.replace("{languageTag}", locale).replace("{locale}", locale)
+	)
+}
+
+async function readMessageFileKeys(messageFilePath: string) {
+	try {
+		const file = await readJsonObject(messageFilePath)
+		if (!file) return undefined
+		return new Set(Object.keys(file).filter((key) => key !== "$schema"))
+	} catch {
+		return undefined
+	}
+}
+
+async function readJsonObject(filePath: string) {
+	return parseJsonObject(await fs.readFile(filePath, "utf8"))
+}
+
+function parseJsonObject(content: string) {
+	const json = JSON.parse(content)
+	return isJsonObject(json) ? json : undefined
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+	return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function hasNestedPath(json: JsonObject, pathParts: string[]) {
+	return getNestedPath(json, pathParts) !== undefined
+}
+
+function getNestedPath(json: JsonObject, pathParts: string[]) {
+	let current: unknown = json
+	for (const part of pathParts) {
+		if (!isJsonObject(current) || !(part in current)) {
+			return undefined
+		}
+		current = current[part]
+	}
+	return current
+}
+
+function deleteNestedPath(json: JsonObject, pathParts: string[]) {
+	if (pathParts.length < 2) return false
+
+	const parents: Array<{ object: JsonObject; key: string }> = []
+	let current: JsonObject = json
+	for (const part of pathParts.slice(0, -1)) {
+		const next = current[part]
+		if (!isJsonObject(next)) {
+			return false
+		}
+		parents.push({ object: current, key: part })
+		current = next
+	}
+
+	const leafKey = pathParts[pathParts.length - 1]
+	if (leafKey === undefined || !(leafKey in current)) {
+		return false
+	}
+
+	delete current[leafKey]
+
+	for (let index = parents.length - 1; index >= 0; index -= 1) {
+		const { object, key } = parents[index]!
+		const child = object[key]
+		if (isJsonObject(child) && Object.keys(child).length === 0) {
+			delete object[key]
+			continue
+		}
+		break
+	}
+
+	return true
+}
+
+function stringifyJsonObject(
+	json: JsonObject,
+	format: { indent: string | number; trailingNewline: boolean }
+) {
+	return `${JSON.stringify(json, undefined, format.indent)}${format.trailingNewline ? "\n" : ""}`
+}
+
+function detectJsonIndent(content: string) {
+	return content.match(/\n(\s+)"/)?.[1] ?? "\t"
 }

@@ -1,5 +1,5 @@
 import { describe, it, beforeEach, expect, vi } from "vitest"
-import { extractMessageCommand } from "./extractMessage.js"
+import { extractMessageCommand, normalizeDottedKeyReplacement } from "./extractMessage.js"
 import { msg } from "../utilities/messages/msg.js"
 import { window } from "vscode"
 import { CONFIGURATION } from "../configuration.js"
@@ -502,5 +502,28 @@ describe("extractMessageCommand", () => {
 		expect(mockTextEditor.edit).toHaveBeenCalled()
 		expect(CONFIGURATION.EVENTS.ON_DID_EXTRACT_MESSAGE.fire).toHaveBeenCalled()
 		expect(msg).toHaveBeenCalledWith("Message extracted.")
+	})
+})
+
+describe("normalizeDottedKeyReplacement", () => {
+	it("Issue #183: uses bracket syntax for Paraglide replacements with dotted bundle IDs", () => {
+		expect(
+			normalizeDottedKeyReplacement({
+				bundleId: "test.new_key",
+				messageReplacement: "m.test_new_key()",
+			})
+		).toEqual({
+			bundleId: "test.new_key",
+			messageReplacement: 'm["test.new_key"]()',
+		})
+	})
+
+	it("leaves non-dotted bundle IDs unchanged", () => {
+		const option = {
+			bundleId: "test_new_key",
+			messageReplacement: "m.test_new_key()",
+		}
+
+		expect(normalizeDottedKeyReplacement(option)).toBe(option)
 	})
 })
