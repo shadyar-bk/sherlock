@@ -1,5 +1,12 @@
 # Sherlock
 
+## 2.3.1
+
+### Patch Changes
+
+- 369575b: Fix edit view text input so typing, deleting, and pasting in translation fields persists correctly.
+- 9b783ae: Keep manually deleted translation keys from being restored on the next Sherlock save.
+
 ## 2.3.0
 
 ### Minor Changes
