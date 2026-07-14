@@ -68,13 +68,13 @@ if (isDev) {
 
 const ctx = await context(buildOptions)
 
+await copyDependencies()
+await copyDirectories()
+
 if (isDev) {
-	await copyDependencies()
-	await copyDirectories()
 	await ctx.watch()
 	console.info("👀 watching for changes...")
 } else {
-	await copyDirectories()
 	await ctx.rebuild()
 	console.info("✅ build complete")
 	await ctx.dispose()

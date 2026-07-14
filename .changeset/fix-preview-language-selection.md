@@ -2,4 +2,4 @@
 "vs-code-extension": patch
 ---
 
-Use the selected preview locale for inline annotations and highlight it in the locale picker.
+Respect the selected preview locale in inline annotations and the locale picker, and include the project settings dependencies in production builds.
