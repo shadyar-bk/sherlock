@@ -279,7 +279,6 @@ async function restoreExplicitDottedMessageKeys(snapshots: DottedMessageKeySnaps
 			new Set(Object.keys(json).filter((key) => key !== "$schema"))
 		)
 	}
-
 }
 
 async function removeMessagesDeletedFromJsonFiles() {

@@ -4,12 +4,14 @@ import * as settings from "../utilities/settings/index.js"
 import { previewLocaleCommand } from "./previewLocaleCommand.js"
 import { CONFIGURATION } from "../configuration.js"
 import { state } from "../utilities/state.js"
+import { getPreviewLocale } from "../utilities/locale/getPreviewLocale.js"
 
 vi.mock("vscode", () => ({
-	window: { showQuickPick: vi.fn() },
+	window: { createQuickPick: vi.fn() },
 	commands: { registerCommand: vi.fn() },
 }))
 vi.mock("../utilities/settings/index.js", () => ({ updateSetting: vi.fn() }))
+vi.mock("../utilities/locale/getPreviewLocale.js", () => ({ getPreviewLocale: vi.fn() }))
 vi.mock("../utilities/settings/statusBar.js", () => ({
 	showStatusBar: vi.fn(),
 }))
@@ -27,9 +29,52 @@ vi.mock("../configuration.js", () => ({
 	},
 }))
 
+const createQuickPickMock = (selectedLocale?: string) => {
+	let acceptListener: (() => void) | undefined
+	let hideListener: (() => void) | undefined
+
+	const quickPick = {
+		activeItems: [] as { label: string }[],
+		dispose: vi.fn(),
+		hide: vi.fn(() => hideListener?.()),
+		items: [] as { label: string }[],
+		onDidAccept: vi.fn((listener: () => void) => {
+			acceptListener = listener
+		}),
+		onDidHide: vi.fn((listener: () => void) => {
+			hideListener = listener
+		}),
+		placeholder: "",
+		selectedItems: [] as { label: string }[],
+		show: vi.fn(() => {
+			if (!selectedLocale) {
+				hideListener?.()
+				return
+			}
+
+			quickPick.selectedItems = [{ label: selectedLocale }]
+			acceptListener?.()
+		}),
+	}
+
+	return quickPick
+}
+
 describe("previewLocaleCommand", () => {
 	beforeEach(() => {
 		vi.clearAllMocks()
+		vi.mocked(getPreviewLocale).mockResolvedValue("en")
+		vi.mocked(state).mockReturnValue({
+			project: {
+				// @ts-expect-error
+				settings: {
+					get: vi.fn().mockResolvedValue({
+						baseLocale: "ckb",
+						locales: ["ckb", "en", "fr"],
+					}),
+				},
+			},
+		})
 	})
 
 	it("should register the command", () => {
@@ -39,26 +84,15 @@ describe("previewLocaleCommand", () => {
 	})
 
 	it("should show language tags and update setting if a tag is selected", async () => {
-		vi.mocked(state).mockReturnValue({
-			project: {
-				// @ts-expect-error
-				settings: {
-					get: vi.fn().mockResolvedValue({
-						baseLocale: "en",
-						locales: ["en", "es", "fr"],
-					}),
-				},
-			},
-		})
-		// @ts-expect-error
-		vi.mocked(vscode.window.showQuickPick).mockResolvedValue("en")
+		const quickPick = createQuickPickMock("fr")
+		vi.mocked(vscode.window.createQuickPick).mockReturnValue(quickPick as never)
 
 		await previewLocaleCommand.callback()
 
-		expect(vscode.window.showQuickPick).toHaveBeenCalledWith(["en", "es", "fr"], {
-			placeHolder: "Select a language",
-		})
-		expect(settings.updateSetting).toHaveBeenCalledWith("previewLanguageTag", "en")
+		expect(quickPick.items).toEqual([{ label: "ckb" }, { label: "en" }, { label: "fr" }])
+		expect(quickPick.activeItems).toEqual([{ label: "en" }])
+		expect(quickPick.placeholder).toBe("Select a language")
+		expect(settings.updateSetting).toHaveBeenCalledWith("previewLanguageTag", "fr")
 		expect(CONFIGURATION.EVENTS.ON_DID_EDIT_MESSAGE.fire).toHaveBeenCalledTimes(1)
 		expect(CONFIGURATION.EVENTS.ON_DID_CREATE_MESSAGE.fire).toHaveBeenCalledTimes(1)
 		expect(CONFIGURATION.EVENTS.ON_DID_EXTRACT_MESSAGE.fire).toHaveBeenCalledTimes(1)
@@ -66,7 +100,8 @@ describe("previewLocaleCommand", () => {
 	})
 
 	it("should not update setting if no tag is selected", async () => {
-		vi.mocked(vscode.window.showQuickPick).mockResolvedValue(undefined)
+		const quickPick = createQuickPickMock()
+		vi.mocked(vscode.window.createQuickPick).mockReturnValue(quickPick as never)
 
 		await previewLocaleCommand.callback()
 
