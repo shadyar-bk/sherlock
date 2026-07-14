@@ -76,15 +76,15 @@ export async function messagePreview(args: { context: vscode.ExtensionContext })
 					// Retrieve the bundle and messages
 					const _bundle = await getSelectedBundleByBundleIdOrAlias(bundle.bundleId)
 
+					const previewLocale = await getPreviewLocale()
+					const translationLocale = previewLocale.length ? previewLocale : baseLocale
+
 					// Get the message from the bundle
-					const message = _bundle?.messages.find((m) => m.locale === baseLocale)
+					const message = _bundle?.messages.find((m) => m.locale === translationLocale)
 
 					const variant =
 						message?.variants.find((v) => v.matches.some((m) => m.type === "catchall-match")) ||
 						message?.variants[0]
-
-					const previewLocale = await getPreviewLocale()
-					const translationLocale = previewLocale.length ? previewLocale : baseLocale
 
 					const translationString = variant
 						? getStringFromPattern({
