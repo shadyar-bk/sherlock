@@ -177,9 +177,9 @@ export async function setupDirectMessageWatcher(args: {
 				return
 			}
 
-				// Check if we're in an event loop
-				if (isInEventLoop) {
-					console.log("Detected potential event loop, breaking the cycle")
+			// Check if we're in an event loop
+			if (isInEventLoop) {
+				console.log("Detected potential event loop, breaking the cycle")
 				return
 			}
 
