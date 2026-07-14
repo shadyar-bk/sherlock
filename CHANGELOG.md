@@ -1,5 +1,11 @@
 # Sherlock
 
+## 2.3.3
+
+### Patch Changes
+
+- 42617bb: Respect the selected preview locale in inline annotations and the locale picker, and include the project settings dependencies in production builds.
+
 ## 2.3.2
 
 ### Patch Changes
