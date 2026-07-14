@@ -69,7 +69,7 @@ export const extractMessageCommand = {
 			value: autoHumanId ? humanId() : "",
 			prompt:
 				autoHumanId &&
-				"Tip: It's best practice to use random names for your messages. Read this [guide](https://inlang.com/documentation/concept/message#idhuman-readable) for more information.",
+				"Tip: It's best practice to use random names for your messages. Read this [post](https://inlang.com/blog/human-readable-message-ids) for more information.",
 		})
 
 		if (bundleId === undefined) {
