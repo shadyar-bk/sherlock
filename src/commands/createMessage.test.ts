@@ -9,6 +9,11 @@ import { humanId, upsertBundleNested } from "@inlang/sdk"
 import { state } from "../utilities/state.js"
 import { v4 as uuidv4 } from "uuid"
 
+const runtimeLease = vi.hoisted(() => ({
+	runTask: vi.fn(),
+	isCurrent: vi.fn(),
+}))
+
 vi.mock("vscode", () => ({
 	window: {
 		showInputBox: vi.fn(),
@@ -51,6 +56,22 @@ vi.mock("../utilities/state", () => ({
 	state: vi.fn(),
 }))
 
+vi.mock("../utilities/project/projectRuntime.js", () => ({
+	getProjectRuntime: () => ({
+		activeProject: () => {
+			const project = state().project
+			return project
+				? {
+						project,
+						path: "/workspace/project.inlang",
+						isCurrent: runtimeLease.isCurrent,
+						runTask: runtimeLease.runTask,
+					}
+				: undefined
+		},
+	}),
+}))
+
 vi.mock("uuid", () => ({
 	v4: vi.fn().mockReturnValue("mocked-uuid-123"),
 }))
@@ -58,6 +79,11 @@ vi.mock("uuid", () => ({
 describe("createMessageCommand", () => {
 	beforeEach(() => {
 		vi.clearAllMocks()
+		runtimeLease.isCurrent.mockReset().mockReturnValue(true)
+		runtimeLease.runTask.mockReset().mockImplementation(async (task: () => Promise<unknown>) => ({
+			status: "completed",
+			value: await task(),
+		}))
 	})
 
 	it("should return if message content input is cancelled", async () => {
@@ -157,6 +183,30 @@ describe("createMessageCommand", () => {
 		expect(CONFIGURATION.EVENTS.ON_DID_CREATE_MESSAGE.fire).toHaveBeenCalled()
 		expect(capture).toHaveBeenCalled()
 		expect(msg).toHaveBeenCalledWith("Message created.")
+	})
+
+	it("does not create a message after its project lease becomes stale", async () => {
+		vi.mocked(state).mockReturnValue({
+			project: {
+				settings: { get: vi.fn().mockResolvedValue({ baseLocale: "en" }) },
+			},
+		} as any)
+		vi.mocked(getSetting).mockResolvedValueOnce(false)
+		vi.mocked(window.showInputBox)
+			.mockResolvedValueOnce("Some message content")
+			.mockResolvedValueOnce("messageId123")
+		runtimeLease.runTask
+			.mockImplementationOnce(async (task: () => Promise<unknown>) => ({
+				status: "completed",
+				value: await task(),
+			}))
+			.mockResolvedValueOnce({ status: "inactive" })
+
+		await createMessageCommand.callback()
+
+		expect(upsertBundleNested).not.toHaveBeenCalled()
+		expect(CONFIGURATION.EVENTS.ON_DID_CREATE_MESSAGE.fire).not.toHaveBeenCalled()
+		expect(msg).toHaveBeenCalledWith("The active project changed before the message was created.")
 	})
 
 	it("should use humanId as default messageId if autoHumanId is true", async () => {

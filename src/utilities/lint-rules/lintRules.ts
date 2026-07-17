@@ -1,6 +1,7 @@
 import { state } from "../state.js"
 import * as vscode from "vscode"
-import { getSelectedBundleByBundleIdOrAlias } from "../helper.js"
+import type { InlangProject } from "@inlang/sdk"
+import { selectBundleById } from "../project/selectBundleById.js"
 
 export interface LintResult {
 	bundleId: string
@@ -14,10 +15,14 @@ export interface LintResult {
 /**
  * Lint rule: Checks if any message in a bundle is missing a translation (empty variants).
  */
-export const missingMessage = async (bundleId: string): Promise<LintResult[]> => {
-	const locales = (await state().project.settings.get()).locales
+export const missingMessage = async (
+	bundleId: string,
+	project: InlangProject | undefined = state().project
+): Promise<LintResult[]> => {
+	if (!project) return []
+	const locales = (await project.settings.get()).locales
 
-	const bundle = await getSelectedBundleByBundleIdOrAlias(bundleId)
+	const bundle = await selectBundleById(project, bundleId)
 
 	if (!bundle) return []
 
@@ -40,11 +45,13 @@ export const missingMessage = async (bundleId: string): Promise<LintResult[]> =>
  * Lint rule: Checks if any message in a bundle is missing the message with the baseLocale
  */
 export const bundleWithoutMessageWithBaseLocale = async (
-	bundleId: string
+	bundleId: string,
+	project: InlangProject | undefined = state().project
 ): Promise<LintResult[]> => {
-	const baseLocale = (await state().project.settings.get()).baseLocale
+	if (!project) return []
+	const baseLocale = (await project.settings.get()).baseLocale
 
-	const bundle = await getSelectedBundleByBundleIdOrAlias(bundleId)
+	const bundle = await selectBundleById(project, bundleId)
 
 	if (!bundle) return []
 
@@ -64,8 +71,12 @@ export const bundleWithoutMessageWithBaseLocale = async (
 /**
  * Lint rule: Checks if any variant in a bundle has an empty pattern.
  */
-export const variantWithEmptyPattern = async (bundleId: string): Promise<LintResult[]> => {
-	const bundle = await getSelectedBundleByBundleIdOrAlias(bundleId)
+export const variantWithEmptyPattern = async (
+	bundleId: string,
+	project: InlangProject | undefined = state().project
+): Promise<LintResult[]> => {
+	if (!project) return []
+	const bundle = await selectBundleById(project, bundleId)
 
 	if (!bundle) return []
 
@@ -85,7 +96,10 @@ export const variantWithEmptyPattern = async (bundleId: string): Promise<LintRes
 /**
  * Utility function to check if the bundle id is a valid JS identifier.
  */
-export const invalidJSIdentifier = async (bundleId: string): Promise<LintResult[]> => {
+export const invalidJSIdentifier = async (
+	bundleId: string,
+	project: InlangProject | undefined = state().project
+): Promise<LintResult[]> => {
 	const isValidJsIdentifier = (id: string) => {
 		try {
 			new Function(`var ${id};`)
@@ -95,7 +109,8 @@ export const invalidJSIdentifier = async (bundleId: string): Promise<LintResult[
 		}
 	}
 
-	const bundle = await getSelectedBundleByBundleIdOrAlias(bundleId)
+	if (!project) return []
+	const bundle = await selectBundleById(project, bundleId)
 
 	if (!bundle) return []
 
@@ -115,8 +130,12 @@ export const invalidJSIdentifier = async (bundleId: string): Promise<LintResult[
 /**
  * Utility function to find identical patterns in messages.
  */
-export const identicalPattern = async (bundleId: string): Promise<LintResult[]> => {
-	const bundle = await getSelectedBundleByBundleIdOrAlias(bundleId)
+export const identicalPattern = async (
+	bundleId: string,
+	project: InlangProject | undefined = state().project
+): Promise<LintResult[]> => {
+	if (!project) return []
+	const bundle = await selectBundleById(project, bundleId)
 
 	if (!bundle) return []
 

@@ -1,11 +1,14 @@
 import * as vscode from "vscode"
-import { state } from "../state.js"
 import { CONFIGURATION } from "../../configuration.js"
+import type { InlangProject } from "@inlang/sdk"
+import { getProjectRuntime, type ActiveProjectLease } from "../project/projectRuntime.js"
 
 export async function settingsPanel(args: { context: vscode.ExtensionContext }) {
+	const lease = getProjectRuntime<InlangProject>().activeProject()
+	if (!lease) return
 	const panel = vscode.window.createWebviewPanel(
 		"settingsPanel",
-		state().selectedProjectPath.split("/").pop() ?? "Settings",
+		lease.path.split("/").pop() ?? "Settings",
 		vscode.ViewColumn.One,
 		{
 			enableScripts: true,
@@ -16,22 +19,42 @@ export async function settingsPanel(args: { context: vscode.ExtensionContext }) 
 	panel.webview.html = await getWebviewContent({
 		context: args.context,
 		webview: panel.webview,
+		lease,
 	})
 
-	panel.webview.onDidReceiveMessage(async (message) => {
+	const messageSubscription = panel.webview.onDidReceiveMessage(async (message) => {
 		switch (message.command) {
 			case "setSettings":
-				state().project.settings.set(message.settings)
-				CONFIGURATION.EVENTS.ON_DID_SETTINGS_VIEW_CHANGE.fire()
+				const result = await lease.runTask(async () => {
+					await lease.project.settings.set(message.settings)
+				})
+				if (result.status === "completed") {
+					CONFIGURATION.EVENTS.ON_DID_SETTINGS_VIEW_CHANGE.fire()
+				}
 				break
 		}
 	})
+	panel.onDidDispose(() => messageSubscription.dispose())
+	if (
+		!lease.own({
+			dispose: () => {
+				messageSubscription.dispose()
+				panel.dispose()
+			},
+		})
+	) {
+		messageSubscription.dispose()
+		panel.dispose()
+	}
 }
 
 export async function getWebviewContent(args: {
 	context: vscode.ExtensionContext
 	webview: vscode.Webview
+	lease?: ActiveProjectLease<InlangProject>
 }): Promise<string> {
+	const lease = args.lease ?? getProjectRuntime<InlangProject>().activeProject()
+	if (!lease) return ""
 	const styleUri = args.webview.asWebviewUri(
 		vscode.Uri.joinPath(args.context.extensionUri, "assets", "settings-view.css")
 	)
@@ -44,8 +67,12 @@ export async function getWebviewContent(args: {
 		vscode.Uri.joinPath(args.context.extensionUri, "assets", "lit-html.js")
 	)
 
-	const settings = await state().project.settings.get()
-	const installedPlugins = await state().project.plugins.get()
+	const projectData = await lease.runTask(async () => ({
+		settings: await lease.project.settings.get(),
+		installedPlugins: await lease.project.plugins.get(),
+	}))
+	if (projectData.status !== "completed") return ""
+	const { settings, installedPlugins } = projectData.value
 	// TODO: Clarify how to derive validation rules from lix
 	// const installedMessageLintRules = state().project.installed.messageLintRules()
 

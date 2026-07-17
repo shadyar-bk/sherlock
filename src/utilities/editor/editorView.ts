@@ -3,16 +3,17 @@ import type { Disposable, WebviewPanel } from "vscode"
 
 import { getUri } from "./helper/getUri.js"
 import { getNonce } from "./helper/getNonce.js"
-import { state } from "../state.js"
 import { CONFIGURATION } from "../../configuration.js"
-import { getSelectedBundleByBundleIdOrAlias } from "../helper.js"
 import { msg } from "../messages/msg.js"
 import type { ChangeEventDetail } from "@inlang/editor-component"
 import { deleteVariant } from "./helper/deleteVariant.js"
 import { deleteBundleNested } from "./helper/deleteBundleNested.js"
 import { handleUpdateBundle } from "./helper/handleBundleUpdate.js"
 import { createMessage } from "./helper/createMessage.js"
-import { saveProject } from "../../main.js"
+import { saveProject, saveProjectData } from "../../main.js"
+import type { InlangProject } from "@inlang/sdk"
+import type { ActiveProjectLease } from "../project/projectRuntime.js"
+import { selectBundleById } from "../project/selectBundleById.js"
 
 // Same interface as before
 export interface UpdateBundleMessage {
@@ -33,19 +34,24 @@ export const EDITOR_PANEL_ID = "editorViewPanel"
  *
  * All your bundle/update logic remains the same.
  */
-export function editorView(args: { context: vscode.ExtensionContext; initialBundleId: string }) {
-	const { context, initialBundleId } = args
-	const extensionUri = context.extensionUri
+export function editorView(args: {
+	extensionUri: vscode.Uri
+	lease: ActiveProjectLease<InlangProject>
+	initialBundleId: string
+}) {
+	const { extensionUri, lease, initialBundleId } = args
 
 	let panel: WebviewPanel | undefined
 	let disposables: Disposable[] = []
 	let bundleId = initialBundleId
 	let pendingUpdate = Promise.resolve()
+	let disposed = false
 
 	/**
 	 * Opens a new panel if none is open, otherwise reveals the existing one.
 	 */
 	async function createOrShowPanel() {
+		if (disposed) return
 		if (panel) {
 			// If we already have a panel, reveal it
 			panel.reveal(vscode.ViewColumn.One)
@@ -66,9 +72,9 @@ export function editorView(args: { context: vscode.ExtensionContext; initialBund
 		// Set up disposal
 		panel.onDidDispose(
 			() => {
-				void persistEdit()
-				dispose()
+				if (lease.isCurrent()) void persistEdit()
 				panel = undefined
+				dispose()
 			},
 			null,
 			disposables
@@ -78,12 +84,14 @@ export function editorView(args: { context: vscode.ExtensionContext; initialBund
 		panel.onDidChangeViewState(
 			async (e) => {
 				if (e.webviewPanel.visible) {
+					const data = await lease.runTask(async () => ({
+						bundle: await selectBundleById(lease.project, bundleId),
+						settings: await lease.project.settings.get(),
+					}))
+					if (data.status !== "completed") return
 					panel?.webview.postMessage({
 						command: "change",
-						data: {
-							bundle: await getSelectedBundleByBundleIdOrAlias(bundleId),
-							settings: await state().project?.settings.get(),
-						},
+						data: data.value,
 					})
 				}
 			},
@@ -95,12 +103,14 @@ export function editorView(args: { context: vscode.ExtensionContext; initialBund
 		panel.webview.html = getHtmlForWebview(panel.webview)
 
 		// Set initial data
+		const initialData = await lease.runTask(async () => ({
+			bundle: await selectBundleById(lease.project, bundleId),
+			settings: await lease.project.settings.get(),
+		}))
+		if (initialData.status !== "completed") return
 		panel.webview.postMessage({
 			command: "change",
-			data: {
-				bundle: await getSelectedBundleByBundleIdOrAlias(bundleId),
-				settings: await state().project?.settings.get(),
-			},
+			data: initialData.value,
 		})
 
 		// Set up the same message listener logic
@@ -117,26 +127,21 @@ export function editorView(args: { context: vscode.ExtensionContext; initialBund
 
 			switch (command) {
 				case "create-message":
-					await createMessage({
-						db: state().project?.db,
-						message: message.message,
-					})
+					await lease.runTask(() =>
+						createMessage({ db: lease.project.db, message: message.message })
+					)
 
 					await updateView()
 					return
 				case "delete-variant":
-					await deleteVariant({
-						db: state().project?.db,
-						variantId: message.id,
-					})
+					await lease.runTask(() => deleteVariant({ db: lease.project.db, variantId: message.id }))
 
 					await updateView()
 					return
 				case "delete-bundle":
-					await deleteBundleNested({
-						db: state().project?.db,
-						bundleId: message.id,
-					})
+					await lease.runTask(() =>
+						deleteBundleNested({ db: lease.project.db, bundleId: message.id })
+					)
 
 					await updateView()
 					return
@@ -166,10 +171,9 @@ export function editorView(args: { context: vscode.ExtensionContext; initialBund
 
 	function queueUpdate(message: UpdateBundleMessage) {
 		pendingUpdate = pendingUpdate.then(() =>
-			handleUpdateBundle({
-				db: state().project?.db,
-				message,
-			})
+			lease
+				.runTask(() => handleUpdateBundle({ db: lease.project.db, message }))
+				.then(() => undefined)
 		)
 		return pendingUpdate
 	}
@@ -179,22 +183,25 @@ export function editorView(args: { context: vscode.ExtensionContext; initialBund
 	 */
 	async function updateView() {
 		await pendingUpdate
+		if (!lease.isCurrent()) return
 
 		CONFIGURATION.EVENTS.ON_DID_EDIT_MESSAGE.fire()
 		CONFIGURATION.EVENTS.ON_DID_EDITOR_VIEW_CHANGE.fire()
 
+		const data = await lease.runTask(async () => ({
+			bundle: await selectBundleById(lease.project, bundleId),
+			settings: await lease.project.settings.get(),
+		}))
+		if (data.status !== "completed") return
 		panel?.webview.postMessage({
 			command: "change",
-			data: {
-				bundle: await getSelectedBundleByBundleIdOrAlias(bundleId),
-				settings: await state().project?.settings.get(),
-			},
+			data: data.value,
 		})
 
 		const workspaceFolder = vscode.workspace.workspaceFolders![0]
 		if (workspaceFolder) {
 			try {
-				await saveProject()
+				await saveProject(lease)
 			} catch (error) {
 				console.error("Failed to save project", error)
 				msg(`Failed to save project. ${String(error)}`, "error")
@@ -204,13 +211,14 @@ export function editorView(args: { context: vscode.ExtensionContext; initialBund
 
 	async function persistEdit() {
 		await pendingUpdate
+		if (!lease.isCurrent()) return
 
 		CONFIGURATION.EVENTS.ON_DID_EDIT_MESSAGE.fire()
 
 		const workspaceFolder = vscode.workspace.workspaceFolders![0]
 		if (workspaceFolder) {
 			try {
-				await saveProject()
+				await saveProject(lease)
 			} catch (error) {
 				console.error("Failed to save project", error)
 				msg(`Failed to save project. ${String(error)}`, "error")
@@ -294,7 +302,14 @@ export function editorView(args: { context: vscode.ExtensionContext; initialBund
 	/**
 	 * Dispose any event listeners or watchers
 	 */
-	function dispose() {
+	async function dispose(options: { persist?: boolean } = {}) {
+		if (disposed) return
+		disposed = true
+		await pendingUpdate
+		if (options.persist) await saveProjectData(lease.project, lease.path)
+		const currentPanel = panel
+		panel = undefined
+		currentPanel?.dispose()
 		while (disposables.length) {
 			const disposable = disposables.pop()
 			if (disposable) disposable.dispose()

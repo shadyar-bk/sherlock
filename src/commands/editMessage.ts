@@ -1,17 +1,21 @@
-import { state } from "../utilities/state.js"
 import { msg } from "../utilities/messages/msg.js"
 import { commands, window } from "vscode"
 import { getPatternFromString, getStringFromPattern } from "../utilities/messages/query.js"
 import { CONFIGURATION } from "../configuration.js"
-import { type Bundle } from "@inlang/sdk"
-import { getSelectedBundleByBundleIdOrAlias } from "../utilities/helper.js"
+import { type Bundle, type InlangProject } from "@inlang/sdk"
+import { getProjectRuntime } from "../utilities/project/projectRuntime.js"
+import { selectBundleById } from "../utilities/project/selectBundleById.js"
 
 export const editMessageCommand = {
 	command: "sherlock.editMessage",
 	title: "Sherlock: Edit a Message",
 	register: commands.registerCommand,
 	callback: async function ({ bundleId, locale }: { bundleId: Bundle["id"]; locale: string }) {
-		const bundle = await getSelectedBundleByBundleIdOrAlias(bundleId)
+		const lease = getProjectRuntime<InlangProject>().activeProject()
+		if (!lease) return msg("No active project.")
+		const bundleResult = await lease.runTask(() => selectBundleById(lease.project, bundleId))
+		if (bundleResult.status !== "completed") return
+		const bundle = bundleResult.value
 
 		if (!bundle) {
 			return msg(`Bundle with id ${bundleId} not found.`)
@@ -48,9 +52,8 @@ export const editMessageCommand = {
 		variant.pattern = getPatternFromString({ string: newValue })
 
 		try {
-			await state()
-				.project.db.transaction()
-				.execute(async (trx) => {
+			const updated = await lease.runTask(async () => {
+				await lease.project.db.transaction().execute(async (trx) => {
 					await trx
 						.updateTable("message")
 						.set({
@@ -68,6 +71,11 @@ export const editMessageCommand = {
 						.returningAll()
 						.execute()
 				})
+				return true
+			})
+			if (updated.status !== "completed") {
+				return msg("The active project changed before the message was updated.")
+			}
 
 			CONFIGURATION.EVENTS.ON_DID_EDIT_MESSAGE.fire()
 

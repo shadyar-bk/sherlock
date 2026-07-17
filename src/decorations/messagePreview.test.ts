@@ -6,7 +6,8 @@ const mocks = vi.hoisted(() => ({
 	getPreviewLocale: vi.fn(),
 	getSetting: vi.fn(),
 	getExtensionApi: vi.fn(),
-	getSelectedBundleByBundleIdOrAlias: vi.fn(),
+	selectBundleById: vi.fn(),
+	projectChangeListener: undefined as (() => void) | undefined,
 }))
 
 vi.mock("vscode", () => ({
@@ -67,12 +68,21 @@ vi.mock("../utilities/settings/index.js", () => ({
 
 vi.mock("../utilities/helper.js", () => ({
 	getExtensionApi: mocks.getExtensionApi,
-	getSelectedBundleByBundleIdOrAlias: mocks.getSelectedBundleByBundleIdOrAlias,
+}))
+
+vi.mock("../utilities/project/selectBundleById.js", () => ({
+	selectBundleById: mocks.selectBundleById,
 }))
 
 vi.mock("../configuration.js", () => ({
 	CONFIGURATION: {
 		EVENTS: {
+			ON_DID_PROJECT_CHANGE: {
+				event: vi.fn((listener: () => void) => {
+					mocks.projectChangeListener = listener
+					return { dispose: vi.fn() }
+				}),
+			},
 			ON_DID_CREATE_MESSAGE: { event: vi.fn() },
 			ON_DID_EDIT_MESSAGE: { event: vi.fn() },
 			ON_DID_EXTRACT_MESSAGE: { event: vi.fn() },
@@ -84,6 +94,7 @@ vi.mock("../configuration.js", () => ({
 describe("messagePreview", () => {
 	beforeEach(() => {
 		vi.clearAllMocks()
+		mocks.projectChangeListener = undefined
 		mocks.getPreviewLocale.mockResolvedValue("en")
 		mocks.getSetting.mockResolvedValue("transparent")
 		mocks.getExtensionApi.mockResolvedValue({
@@ -99,7 +110,7 @@ describe("messagePreview", () => {
 				]),
 			],
 		})
-		mocks.getSelectedBundleByBundleIdOrAlias.mockResolvedValue({
+		mocks.selectBundleById.mockResolvedValue({
 			messages: [
 				{
 					locale: "ckb",
@@ -126,7 +137,24 @@ describe("messagePreview", () => {
 	})
 
 	it("renders the message for the selected preview locale", async () => {
-		await messagePreview({ context: { subscriptions: [] } as never })
+		const project = {
+			settings: {
+				get: vi.fn(async () => ({ baseLocale: "ckb", locales: ["ckb", "en"] })),
+			},
+		}
+		messagePreview({
+			subscriptions: [],
+			session: {
+				path: "/workspace/project.inlang",
+				project,
+				runTask: async <T>(task: () => Promise<T>) => ({
+					status: "completed" as const,
+					value: await task(),
+				}),
+			} as never,
+		})
+		expect(mocks.setDecorations).not.toHaveBeenCalled()
+		mocks.projectChangeListener?.()
 
 		await vi.waitFor(() => {
 			expect(mocks.setDecorations).toHaveBeenCalledWith(expect.anything(), [
@@ -137,5 +165,29 @@ describe("messagePreview", () => {
 				}),
 			])
 		})
+	})
+
+	it("does not apply decorations computed by a session that became inactive", async () => {
+		const project = {
+			settings: {
+				get: vi.fn(async () => ({ baseLocale: "ckb", locales: ["ckb", "en"] })),
+			},
+		}
+		messagePreview({
+			subscriptions: [],
+			session: {
+				path: "/workspace/project.inlang",
+				project,
+				runTask: async <T>(task: () => Promise<T>) => {
+					await task()
+					return { status: "inactive" as const }
+				},
+			} as never,
+		})
+
+		mocks.projectChangeListener?.()
+		await vi.waitFor(() => expect(mocks.selectBundleById).toHaveBeenCalled())
+
+		expect(mocks.setDecorations).not.toHaveBeenCalled()
 	})
 })

@@ -1,100 +1,124 @@
 import * as vscode from "vscode"
-import { describe, it, expect, vi, beforeEach } from "vitest"
-import { statusBar, showStatusBar } from "./statusBar.js"
-import { state } from "../state.js"
-import { getSetting } from "./index.js"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { CONFIGURATION } from "../../configuration.js"
+import { getPreviewLocale } from "../locale/getPreviewLocale.js"
+import { showStatusBar, statusBar } from "./statusBar.js"
 
-let lastStatusBarItem: any = undefined // Track the last status bar item created for testing
+const createdItems: Array<{
+	dispose: ReturnType<typeof vi.fn>
+	command?: string
+	text?: string
+	tooltip?: string
+	show: ReturnType<typeof vi.fn>
+}> = []
 
 vi.mock("vscode", () => ({
 	window: {
-		createStatusBarItem: vi.fn().mockImplementation(() => {
-			const statusBarMock = {
+		createStatusBarItem: vi.fn(() => {
+			const item = {
 				dispose: vi.fn(),
 				command: undefined,
 				text: undefined,
 				tooltip: undefined,
 				show: vi.fn(),
 			}
-			lastStatusBarItem = statusBarMock
-			return statusBarMock
+			createdItems.push(item)
+			return item
 		}),
 	},
-	StatusBarAlignment: {
-		Right: 1,
-	},
-	commands: {
-		registerCommand: vi.fn(),
-	},
-	EventEmitter: vi.fn().mockImplementation(() => ({
-		event: vi.fn(),
-	})),
-	CodeActionKind: {
-		QuickFix: vi.fn(),
+	StatusBarAlignment: { Right: 1 },
+	commands: { registerCommand: vi.fn() },
+	CodeActionKind: { QuickFix: "quickfix" },
+	EventEmitter: class {
+		fire = vi.fn()
+		event = vi.fn(() => ({ dispose: vi.fn() }))
 	},
 }))
 
-vi.mock("../state", () => ({
-	state: vi.fn().mockImplementation(() => ({
-		project: {
-			settings: {
-				get: vi.fn().mockResolvedValueOnce({ baseLocale: "en", locales: ["en", "de"] }),
-			},
-		},
-	})),
+vi.mock("../locale/getPreviewLocale.js", () => ({
+	getPreviewLocale: vi.fn(),
 }))
 
-vi.mock("./index", () => ({
-	getSetting: vi.fn().mockResolvedValueOnce("de"),
-}))
+function deferred<T>() {
+	let resolve!: (value: T) => void
+	const promise = new Promise<T>((resolvePromise) => {
+		resolve = resolvePromise
+	})
+	return { promise, resolve }
+}
+
+const activeContexts: vscode.ExtensionContext[] = []
+
+async function activateStatusBar() {
+	const context = { subscriptions: [] } as unknown as vscode.ExtensionContext
+	activeContexts.push(context)
+	await statusBar({ context })
+	return context
+}
 
 describe("statusBar", () => {
 	beforeEach(() => {
+		createdItems.length = 0
 		vi.clearAllMocks()
+		vi.mocked(getPreviewLocale).mockResolvedValue("en")
 	})
 
-	it("should subscribe to the appropriate events", async () => {
-		const context = {
-			subscriptions: { push: vi.fn() },
-		} as unknown as vscode.ExtensionContext
-		await statusBar({ context })
+	afterEach(() => {
+		for (const context of activeContexts.splice(0)) {
+			for (const subscription of context.subscriptions.toReversed()) subscription.dispose()
+		}
+	})
 
-		expect(context.subscriptions.push).toHaveBeenCalledTimes(2)
+	it("subscribes to project and locale changes and creates the initial item", async () => {
+		const context = await activateStatusBar()
+
+		expect(context.subscriptions).toHaveLength(3)
 		expect(CONFIGURATION.EVENTS.ON_DID_PROJECT_TREE_VIEW_CHANGE.event).toHaveBeenCalled()
 		expect(CONFIGURATION.EVENTS.ON_DID_PREVIEW_LOCALE_CHANGE.event).toHaveBeenCalled()
-	})
-})
-
-describe("showStatusBar", () => {
-	beforeEach(() => {
-		vi.clearAllMocks()
+		expect(createdItems.at(-1)?.text).toBe("Sherlock: en")
 	})
 
-	it("should create a new status bar item if it does not exist", async () => {
-		await showStatusBar()
-		expect(vscode.window.createStatusBarItem).toHaveBeenCalledTimes(1)
-	})
-
-	it("should dispose the existing status bar item if it exists", async () => {
-		await showStatusBar()
-		const disposeMock = lastStatusBarItem.dispose
+	it("replaces and disposes the existing item", async () => {
+		await activateStatusBar()
+		const firstItem = createdItems.at(-1)!
+		vi.mocked(getPreviewLocale).mockResolvedValueOnce("de")
 
 		await showStatusBar()
 
-		expect(disposeMock).toHaveBeenCalled()
+		expect(firstItem.dispose).toHaveBeenCalledTimes(1)
+		expect(createdItems.at(-1)?.text).toBe("Sherlock: de")
 	})
 
-	it("should handle the case when previewLocale is not available", async () => {
-		vi.mocked(getSetting).mockResolvedValueOnce("")
-		await showStatusBar()
-		expect(vscode.window.createStatusBarItem).toHaveBeenCalledTimes(1)
+	it("keeps only the newest concurrent update", async () => {
+		await activateStatusBar()
+		const slow = deferred<string>()
+		const fast = deferred<string>()
+		vi.mocked(getPreviewLocale)
+			.mockImplementationOnce(() => slow.promise)
+			.mockImplementationOnce(() => fast.promise)
+
+		const slowUpdate = showStatusBar()
+		const fastUpdate = showStatusBar()
+		fast.resolve("de")
+		await fastUpdate
+		slow.resolve("en")
+		await slowUpdate
+
+		expect(createdItems).toHaveLength(2)
+		expect(createdItems.at(-1)?.text).toBe("Sherlock: de")
 	})
 
-	it("should not set previewLocale if it's not in settings.locales", async () => {
-		vi.mocked(getSetting).mockResolvedValueOnce("es")
-		await showStatusBar()
+	it("does not recreate the item after disposal", async () => {
+		const context = await activateStatusBar()
+		const inFlight = deferred<string>()
+		vi.mocked(getPreviewLocale).mockImplementationOnce(() => inFlight.promise)
+		const update = showStatusBar()
 
-		expect(lastStatusBarItem.text).toBe("Sherlock: en")
+		context.subscriptions.at(-1)?.dispose()
+		inFlight.resolve("de")
+		await update
+
+		expect(createdItems).toHaveLength(1)
+		expect(createdItems[0]?.dispose).toHaveBeenCalledTimes(1)
 	})
 })

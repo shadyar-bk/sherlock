@@ -6,6 +6,11 @@ import { CONFIGURATION } from "../configuration.js"
 import { state } from "../utilities/state.js"
 import { getPreviewLocale } from "../utilities/locale/getPreviewLocale.js"
 
+const runtimeLease = vi.hoisted(() => ({
+	runTask: vi.fn(),
+	isCurrent: vi.fn(),
+}))
+
 vi.mock("vscode", () => ({
 	window: { createQuickPick: vi.fn() },
 	commands: { registerCommand: vi.fn() },
@@ -17,6 +22,21 @@ vi.mock("../utilities/settings/statusBar.js", () => ({
 }))
 vi.mock("../utilities/state.js", () => ({
 	state: vi.fn(),
+}))
+vi.mock("../utilities/project/projectRuntime.js", () => ({
+	getProjectRuntime: () => ({
+		activeProject: () => {
+			const project = state().project
+			return project
+				? {
+						project,
+						path: "/workspace/project.inlang",
+						isCurrent: runtimeLease.isCurrent,
+						runTask: runtimeLease.runTask,
+					}
+				: undefined
+		},
+	}),
 }))
 vi.mock("../configuration.js", () => ({
 	CONFIGURATION: {
@@ -63,6 +83,11 @@ const createQuickPickMock = (selectedLocale?: string) => {
 describe("previewLocaleCommand", () => {
 	beforeEach(() => {
 		vi.clearAllMocks()
+		runtimeLease.isCurrent.mockReset().mockReturnValue(true)
+		runtimeLease.runTask.mockReset().mockImplementation(async (task: () => Promise<unknown>) => ({
+			status: "completed",
+			value: await task(),
+		}))
 		vi.mocked(getPreviewLocale).mockResolvedValue("en")
 		vi.mocked(state).mockReturnValue({
 			project: {
@@ -109,6 +134,17 @@ describe("previewLocaleCommand", () => {
 		expect(CONFIGURATION.EVENTS.ON_DID_EDIT_MESSAGE.fire).not.toHaveBeenCalled()
 		expect(CONFIGURATION.EVENTS.ON_DID_CREATE_MESSAGE.fire).not.toHaveBeenCalled()
 		expect(CONFIGURATION.EVENTS.ON_DID_EXTRACT_MESSAGE.fire).not.toHaveBeenCalled()
+		expect(CONFIGURATION.EVENTS.ON_DID_PREVIEW_LOCALE_CHANGE.fire).not.toHaveBeenCalled()
+	})
+
+	it("does not apply a locale chosen for a project that was replaced", async () => {
+		const quickPick = createQuickPickMock("fr")
+		vi.mocked(vscode.window.createQuickPick).mockReturnValue(quickPick as never)
+		runtimeLease.isCurrent.mockReturnValue(false)
+
+		await previewLocaleCommand.callback()
+
+		expect(settings.updateSetting).not.toHaveBeenCalled()
 		expect(CONFIGURATION.EVENTS.ON_DID_PREVIEW_LOCALE_CHANGE.fire).not.toHaveBeenCalled()
 	})
 })

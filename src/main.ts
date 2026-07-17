@@ -2,13 +2,19 @@ import * as vscode from "vscode"
 import { handleError } from "./utilities/utils.js"
 import { CONFIGURATION } from "./configuration.js"
 import { projectView } from "./utilities/project/project.js"
-import { setProjectsInWorkspace, setState, state } from "./utilities/state.js"
+import {
+	prepareProject,
+	setActiveProject,
+	setProjectsInWorkspace,
+	state,
+} from "./utilities/state.js"
 import { messagePreview } from "./decorations/messagePreview.js"
 import { ExtractMessage } from "./actions/extractMessage.js"
 import { errorView } from "./utilities/errors/errors.js"
-import { messageView } from "./utilities/messages/messages.js"
+import { messageView, type MessageViewController } from "./utilities/messages/messages.js"
 import { createFileSystemMapper, type FileSystem } from "./utilities/fs/createFileSystemMapper.js"
 import fs from "node:fs/promises"
+import * as nodeFs from "node:fs"
 import { gettingStartedView } from "./utilities/getting-started/gettingStarted.js"
 import { closestInlangProject } from "./utilities/project/closestInlangProject.js"
 import { recommendationBannerView } from "./utilities/recommendation/recommendation.js"
@@ -16,10 +22,23 @@ import { capture } from "./services/telemetry/index.js"
 import packageJson from "../package.json" with { type: "json" }
 import { statusBar } from "./utilities/settings/statusBar.js"
 import fg from "fast-glob"
-import { saveProjectToDirectory, type IdeExtensionConfig } from "@inlang/sdk"
+import {
+	loadProjectFromDirectory,
+	saveProjectToDirectory,
+	type IdeExtensionConfig,
+	type InlangProject,
+} from "@inlang/sdk"
+import type { ActiveProjectLease } from "./utilities/project/projectRuntime.js"
 import path from "node:path"
 import { linterDiagnostics } from "./diagnostics/linterDiagnostics.js"
 import { setupDirectMessageWatcher } from "./utilities/fs/experimental/directMessageHandler.js"
+import { deactivateBeforeClose, type Disposable } from "./utilities/project/projectSession.js"
+import {
+	createProjectRuntime,
+	disposeProjectRuntime,
+	getProjectRuntime,
+	installProjectRuntime,
+} from "./utilities/project/projectRuntime.js"
 //import { initErrorMonitoring } from "./services/error-monitoring/implementation.js"
 
 const messageFileSnapshots = new Map<string, Set<string>>()
@@ -37,9 +56,7 @@ type DottedMessageKeySnapshot = {
 }
 
 // Entry Point
-export async function activate(
-	context: vscode.ExtensionContext
-): Promise<{ context: vscode.ExtensionContext } | undefined> {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
 	// Sentry Error Handling
 	//initErrorMonitoring()
 
@@ -56,7 +73,68 @@ export async function activate(
 		const mappedFs = createFileSystemMapper(path.normalize(workspaceFolder.uri.fsPath), fs)
 
 		await setProjects({ workspaceFolder })
-		await main({ context, workspaceFolder, fs: mappedFs })
+		registerGlobalCommands(context)
+		let messageController: MessageViewController | undefined
+		if (state().projectsInWorkspace.length > 0) {
+			messageController = await messageView({ context, workspaceFolder })
+		}
+		const runtime = createProjectRuntime({
+			loadProject: async (projectPath) => {
+				const project = await loadProjectFromDirectory({ path: projectPath, fs: nodeFs })
+				prepareProject(project)
+				return project
+			},
+			publishActiveSession: (session) =>
+				setActiveProject(session ? { project: session.project, path: session.path } : undefined),
+			prepareSession: async (session, resources) => {
+				const ideExtension = (await session.project.plugins.get()).find(
+					(plugin) => plugin?.meta?.["app.inlang.ideExtension"]
+				)?.meta?.["app.inlang.ideExtension"] as IdeExtensionConfig | undefined
+				const documentSelectors: vscode.DocumentSelector = [
+					{ language: "javascript", pattern: `!${CONFIGURATION.FILES.PROJECT}` },
+					...(ideExtension?.documentSelectors ?? []),
+				]
+				return {
+					activate: () => {
+						resources.push(
+							deactivateBeforeClose(
+								vscode.languages.registerCodeActionsProvider(
+									documentSelectors,
+									new ExtractMessage(),
+									{ providedCodeActionKinds: ExtractMessage.providedCodeActionKinds }
+								)
+							)
+						)
+						messagePreview({ subscriptions: resources, session })
+						void linterDiagnostics({ subscriptions: resources, fs: mappedFs, session })
+						if (messageController) {
+							resources.push(deactivateBeforeClose(messageController.bindProject(session)))
+						}
+					},
+					afterPreviousDisposed: async () => {
+						await setupDirectMessageWatcher({
+							subscriptions: resources,
+							workspaceFolder,
+							session,
+						})
+						await session
+							.runTask(async () => {
+								resources.push(await seedMessageFileSnapshots(session.project, session.path))
+								await handleInlangErrors(session.project)
+							})
+							.catch(handleError)
+					},
+				}
+			},
+			onDidReplaceSession: notifyProjectChanged,
+			onError: (error) => handleError(error),
+		})
+		installProjectRuntime(runtime)
+		context.subscriptions.push({ dispose: () => void disposeProjectRuntime() })
+		await activateInitialProjectSession({ context, workspaceFolder, fs: mappedFs })
+		if (state().projectsInWorkspace.length > 0) {
+			await registerGlobalViews({ context, workspaceFolder, fs: mappedFs })
+		}
 
 		capture({
 			event: "IDE-EXTENSION activated",
@@ -66,16 +144,14 @@ export async function activate(
 				platform: process.platform,
 			},
 		})
-
-		return { context }
 	} catch (error) {
+		await disposeProjectRuntime()
 		handleError(error)
-		return
 	}
 }
 
 // Main Function
-export async function main(args: {
+async function activateInitialProjectSession(args: {
 	context: vscode.ExtensionContext
 	workspaceFolder: vscode.WorkspaceFolder
 	fs: FileSystem
@@ -87,38 +163,15 @@ export async function main(args: {
 			projects: state().projectsInWorkspace,
 		})
 
-		setState({
-			...state(),
-			selectedProjectPath:
-				closestProjectToWorkspace?.projectPath || state().projectsInWorkspace[0]?.projectPath || "",
-		})
+		const selectedProjectPath =
+			state().selectedProjectPath ||
+			closestProjectToWorkspace?.projectPath ||
+			state().projectsInWorkspace[0]?.projectPath ||
+			""
 
 		vscode.commands.executeCommand("setContext", "sherlock:hasProjectInWorkspace", true)
-
-		// Recommendation Banner
-		await recommendationBannerView(args)
-		// Project Listings
-		await projectView(args)
-		// Messages
-		await messageView(args)
-		// Errors
-		await errorView(args)
-		// Status Bar
-		await statusBar(args)
-
-		// Register Extension Components & Handle Inlang Errors
-		await registerExtensionComponents(args)
-		await handleInlangErrors()
-
-		// Set up both file system watchers
-		// setupFileSystemWatcher(args)
-
-		// Set up direct message watcher as a fallback
-		await seedMessageFileSnapshots()
-		await setupDirectMessageWatcher({
-			context: args.context,
-			workspaceFolder: args.workspaceFolder,
-		})
+		const result = await getProjectRuntime().replaceProject(selectedProjectPath)
+		if (result.status === "failed") throw result.error
 
 		return
 	} else {
@@ -126,37 +179,39 @@ export async function main(args: {
 	}
 }
 
-async function registerExtensionComponents(args: {
+function registerGlobalCommands(context: vscode.ExtensionContext) {
+	context.subscriptions.push(
+		...Object.values(CONFIGURATION.COMMANDS).map((command) =>
+			command.register(command.command, command.callback as any)
+		),
+		CONFIGURATION.EVENTS.ON_DID_PROJECT_CHANGE.event(() => {
+			CONFIGURATION.EVENTS.ON_DID_PROJECT_TREE_VIEW_CHANGE.fire(undefined)
+			CONFIGURATION.EVENTS.ON_DID_ERROR_TREE_VIEW_CHANGE.fire(undefined)
+		})
+	)
+}
+
+async function registerGlobalViews(args: {
 	context: vscode.ExtensionContext
 	workspaceFolder: vscode.WorkspaceFolder
 	fs: FileSystem
 }) {
-	args.context.subscriptions.push(
-		...Object.values(CONFIGURATION.COMMANDS).map((c) => c.register(c.command, c.callback as any))
-	)
-
-	const ideExtension = (await state().project.plugins.get()).find(
-		(plugin) => plugin?.meta?.["app.inlang.ideExtension"]
-	)?.meta?.["app.inlang.ideExtension"] as IdeExtensionConfig | undefined
-
-	const documentSelectors: vscode.DocumentSelector = [
-		{ language: "javascript", pattern: `!${CONFIGURATION.FILES.PROJECT}` },
-		...(ideExtension?.documentSelectors ?? []),
-	]
-
-	args.context.subscriptions.push(
-		vscode.languages.registerCodeActionsProvider(documentSelectors, new ExtractMessage(), {
-			providedCodeActionKinds: ExtractMessage.providedCodeActionKinds,
-		})
-	)
-
-	messagePreview(args)
-	// TODO: Replace by lix validation rules
-	linterDiagnostics(args)
+	await recommendationBannerView(args)
+	await projectView(args)
+	await errorView(args)
+	await statusBar(args)
 }
 
-async function handleInlangErrors() {
-	const inlangErrors = (await state().project.errors.get()) || []
+function notifyProjectChanged() {
+	CONFIGURATION.EVENTS.ON_DID_PROJECT_CHANGE.fire(undefined)
+}
+
+export async function deactivate() {
+	await disposeProjectRuntime()
+}
+
+async function handleInlangErrors(project: Awaited<ReturnType<typeof loadProjectFromDirectory>>) {
+	const inlangErrors = (await project.errors.get()) || []
 	if (inlangErrors.length > 0) {
 		console.error("Extension errors (Sherlock):", inlangErrors)
 	}
@@ -188,30 +243,37 @@ async function setProjects(args: { workspaceFolder: vscode.WorkspaceFolder }) {
 	setProjectsInWorkspace(await discoverProjectsInWorkspace(args))
 }
 
-export async function saveProject() {
+export async function saveProject(
+	lease:
+		| ActiveProjectLease<InlangProject>
+		| undefined = getProjectRuntime<InlangProject>().activeProject()
+) {
+	if (!lease) return
 	try {
-		if (state().selectedProjectPath && state().project) {
-			await removeMessagesDeletedFromJsonFiles()
-			const dottedKeySnapshots = await snapshotExplicitDottedMessageKeys()
-
-			await saveProjectToDirectory({
-				fs: createFileSystemMapper(state().selectedProjectPath, fs),
-				project: state().project,
-				path: state().selectedProjectPath,
-			})
-
-			await restoreExplicitDottedMessageKeys(dottedKeySnapshots)
-		}
+		await lease.runTask(() => saveProjectData(lease.project, lease.path))
 	} catch (error) {
 		handleError(error)
 	}
 }
 
-async function snapshotExplicitDottedMessageKeys(): Promise<DottedMessageKeySnapshot[]> {
-	const project = state().project
-	const selectedProjectPath = state().selectedProjectPath
-	if (!project || !selectedProjectPath) return []
+/** Persists a project that is still owned by a session during awaited teardown. */
+export async function saveProjectData(project: InlangProject, projectPath: string) {
+	await removeMessagesDeletedFromJsonFiles(project, projectPath)
+	const dottedKeySnapshots = await snapshotExplicitDottedMessageKeys(project, projectPath)
 
+	await saveProjectToDirectory({
+		fs: createFileSystemMapper(projectPath, fs),
+		project,
+		path: projectPath,
+	})
+
+	await restoreExplicitDottedMessageKeys(dottedKeySnapshots)
+}
+
+async function snapshotExplicitDottedMessageKeys(
+	project: InlangProject,
+	selectedProjectPath: string
+): Promise<DottedMessageKeySnapshot[]> {
 	const settings = await project.settings.get()
 	const pathPattern = getJsonPathPattern(settings)
 	if (!pathPattern) return []
@@ -281,11 +343,10 @@ async function restoreExplicitDottedMessageKeys(snapshots: DottedMessageKeySnaps
 	}
 }
 
-async function removeMessagesDeletedFromJsonFiles() {
-	const project = state().project
-	const selectedProjectPath = state().selectedProjectPath
-	if (!project || !selectedProjectPath) return
-
+async function removeMessagesDeletedFromJsonFiles(
+	project: InlangProject,
+	selectedProjectPath: string
+) {
 	const settings = await project.settings.get()
 	const baseLocale = settings.baseLocale ?? settings.locales[0]
 	const pathPattern = getJsonPathPattern(settings)
@@ -359,27 +420,37 @@ async function removeMessagesDeletedFromJsonFiles() {
 	}
 }
 
-async function seedMessageFileSnapshots() {
-	const project = state().project
-	const selectedProjectPath = state().selectedProjectPath
-	if (!project || !selectedProjectPath) return
+async function seedMessageFileSnapshots(
+	project: Awaited<ReturnType<typeof loadProjectFromDirectory>>,
+	selectedProjectPath: string
+): Promise<Disposable> {
+	const ownedSnapshots = new Map<string, Set<string>>()
 
 	const settings = await project.settings.get()
 	const pathPattern = getJsonPathPattern(settings)
-	if (!pathPattern) return
+	if (!pathPattern) return { dispose: () => undefined }
 
 	for (const locale of settings.locales) {
 		const messageFilePath = getMessageFilePath(selectedProjectPath, pathPattern, locale)
 		const keys = await readMessageFileKeys(messageFilePath)
 		if (keys) {
 			messageFileSnapshots.set(messageFilePath, keys)
+			ownedSnapshots.set(messageFilePath, keys)
 		}
+	}
+
+	return {
+		dispose: () => {
+			for (const [messageFilePath, snapshot] of ownedSnapshots) {
+				if (messageFileSnapshots.get(messageFilePath) === snapshot) {
+					messageFileSnapshots.delete(messageFilePath)
+				}
+			}
+		},
 	}
 }
 
-function getJsonPathPattern(
-	settings: Awaited<ReturnType<NonNullable<typeof state>["project"]["settings"]["get"]>>
-) {
+function getJsonPathPattern(settings: Awaited<ReturnType<InlangProject["settings"]["get"]>>) {
 	const pathPattern =
 		(settings as any)["plugin.inlang.json"]?.pathPattern ??
 		(settings as any)["plugin.inlang.messageFormat"]?.pathPattern

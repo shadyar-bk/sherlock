@@ -20,6 +20,7 @@ export const CONFIGURATION = {
 		ON_DID_CREATE_MESSAGE: new EventEmitter<void>(),
 		ON_DID_EDIT_MESSAGE: new EventEmitter<void>(),
 		ON_DID_EXTRACT_MESSAGE: new EventEmitter<void>(),
+		ON_DID_PROJECT_CHANGE: new EventEmitter<void>(),
 		ON_DID_PROJECT_TREE_VIEW_CHANGE: new EventEmitter<ProjectViewNode | undefined>(),
 		ON_DID_ERROR_TREE_VIEW_CHANGE: new EventEmitter<ErrorNode | undefined>(),
 		ON_DID_PREVIEW_LOCALE_CHANGE: new EventEmitter<string>(),

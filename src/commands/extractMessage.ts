@@ -1,4 +1,3 @@
-import { state } from "../utilities/state.js"
 import { msg } from "../utilities/messages/msg.js"
 import { commands, type TextEditor, window } from "vscode"
 import { capture } from "../services/telemetry/index.js"
@@ -9,10 +8,12 @@ import {
 	humanId,
 	upsertBundleNested,
 	type IdeExtensionConfig,
+	type InlangProject,
 	type NewBundleNested,
 } from "@inlang/sdk"
 import { v4 as uuidv4 } from "uuid"
-import { saveProject } from "../main.js"
+import { saveProjectData } from "../main.js"
+import { getProjectRuntime } from "../utilities/project/projectRuntime.js"
 
 /**
  * Helps the user to extract messages from the active text editor.
@@ -25,11 +26,16 @@ export const extractMessageCommand = {
 		// Simulating an error to test the catch block
 		// throw new Error("Forced error for testing");
 
-		const ideExtension = (await state().project.plugins.get()).find(
-			(plugin) => plugin?.meta?.["app.inlang.ideExtension"]
-		)?.meta?.["app.inlang.ideExtension"] as IdeExtensionConfig | undefined
-
-		const baseLocale = (await state().project.settings.get()).baseLocale
+		const lease = getProjectRuntime<InlangProject>().activeProject()
+		if (!lease) return msg("No active project.")
+		const projectConfiguration = await lease.runTask(async () => ({
+			ideExtension: (await lease.project.plugins.get()).find(
+				(plugin) => plugin?.meta?.["app.inlang.ideExtension"]
+			)?.meta?.["app.inlang.ideExtension"] as IdeExtensionConfig | undefined,
+			baseLocale: (await lease.project.settings.get()).baseLocale,
+		}))
+		if (projectConfiguration.status !== "completed") return
+		const { ideExtension, baseLocale } = projectConfiguration.value
 
 		if (!ideExtension) {
 			return msg(
@@ -149,15 +155,21 @@ export const extractMessageCommand = {
 		}
 
 		try {
-			await upsertBundleNested(state().project.db, bundle)
+			const extracted = await lease.runTask(async () => {
+				await upsertBundleNested(lease.project.db, bundle)
 
-			await textEditor.edit((editor) => {
-				editor.replace(textEditor.selection, preparedExtractOption)
+				await textEditor.edit((editor) => {
+					editor.replace(textEditor.selection, preparedExtractOption)
+				})
+
+				await saveProjectData(lease.project, lease.path)
+				return true
 			})
+			if (extracted.status !== "completed") {
+				return msg("The active project changed before the message was extracted.")
+			}
 
 			CONFIGURATION.EVENTS.ON_DID_EXTRACT_MESSAGE.fire()
-
-			await saveProject()
 
 			capture({
 				event: "IDE-EXTENSION command executed: Extract Message",

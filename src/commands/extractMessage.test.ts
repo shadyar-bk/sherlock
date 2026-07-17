@@ -8,6 +8,11 @@ import { state } from "../utilities/state.js"
 import { upsertBundleNested } from "@inlang/sdk"
 import { capture } from "../services/telemetry/index.js"
 
+const runtimeLease = vi.hoisted(() => ({
+	runTask: vi.fn(),
+	isCurrent: vi.fn(),
+}))
+
 // Mocking the necessary modules
 vi.mock("../utilities/state", () => ({
 	state: vi.fn(),
@@ -64,6 +69,7 @@ vi.mock("@inlang/sdk", () => ({
 	createBundle: vi.fn().mockReturnValue({ id: "generatedId123", alias: "alias123" }),
 	createMessage: vi.fn().mockReturnValue({ id: "messageId123", bundleId: "generatedId123" }),
 	upsertBundleNested: vi.fn(),
+	saveProjectToDirectory: vi.fn(),
 }))
 
 vi.mock("../utilities/messages/isQuoted", () => ({
@@ -75,9 +81,30 @@ vi.mock("../utilities/state.js", () => ({
 	state: vi.fn(),
 }))
 
+vi.mock("../utilities/project/projectRuntime.js", () => ({
+	getProjectRuntime: () => ({
+		activeProject: () => {
+			const project = state().project
+			return project
+				? {
+						project,
+						path: "/workspace/project.inlang",
+						isCurrent: runtimeLease.isCurrent,
+						runTask: runtimeLease.runTask,
+					}
+				: undefined
+		},
+	}),
+}))
+
 describe("extractMessageCommand", () => {
 	beforeEach(() => {
 		vi.clearAllMocks()
+		runtimeLease.isCurrent.mockReset().mockReturnValue(true)
+		runtimeLease.runTask.mockReset().mockImplementation(async (task: () => Promise<unknown>) => ({
+			status: "completed",
+			value: await task(),
+		}))
 	})
 
 	it("should show warning if ideExtension is not configured", async () => {
@@ -502,6 +529,58 @@ describe("extractMessageCommand", () => {
 		expect(mockTextEditor.edit).toHaveBeenCalled()
 		expect(CONFIGURATION.EVENTS.ON_DID_EXTRACT_MESSAGE.fire).toHaveBeenCalled()
 		expect(msg).toHaveBeenCalledWith("Message extracted.")
+	})
+
+	it("does not edit a document after its project lease becomes stale", async () => {
+		vi.mocked(state).mockReturnValue({
+			project: {
+				plugins: {
+					get: async () => [
+						{
+							key: "plugin1",
+							meta: {
+								"app.inlang.ideExtension": {
+									extractMessageOptions: [
+										{
+											callback: vi.fn(() => ({
+												bundleId: "generatedId123",
+												messageReplacement: "Replacement Text",
+											})),
+										},
+									],
+								},
+							},
+						},
+					],
+				},
+				settings: { get: async () => ({ baseLocale: "en", locales: ["en"] }) },
+				db: {},
+			},
+		} as any)
+		const mockTextEditor = {
+			selection: {
+				isEmpty: false,
+				start: { line: 1, character: 1 },
+				end: { line: 1, character: 20 },
+			},
+			document: { getText: () => "Some text" },
+			edit: vi.fn(),
+		}
+		vi.mocked(getSetting).mockResolvedValueOnce(true)
+		vi.mocked(window.showInputBox).mockResolvedValueOnce("generatedId123")
+		vi.mocked(window.showQuickPick).mockResolvedValueOnce("Replacement Text" as never)
+		runtimeLease.runTask.mockImplementation(async (task: () => Promise<unknown>) =>
+			runtimeLease.runTask.mock.calls.length === 1
+				? { status: "completed", value: await task() }
+				: { status: "inactive" }
+		)
+
+		await extractMessageCommand.callback(mockTextEditor as any)
+
+		expect(upsertBundleNested).not.toHaveBeenCalled()
+		expect(mockTextEditor.edit).not.toHaveBeenCalled()
+		expect(CONFIGURATION.EVENTS.ON_DID_EXTRACT_MESSAGE.fire).not.toHaveBeenCalled()
+		expect(msg).toHaveBeenCalledWith("The active project changed before the message was extracted.")
 	})
 })
 

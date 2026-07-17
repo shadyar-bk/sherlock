@@ -1,11 +1,15 @@
 import * as vscode from "vscode"
 import { updateSetting } from "../utilities/settings/index.js"
-import { state } from "../utilities/state.js"
 import { CONFIGURATION } from "../configuration.js"
 import { getPreviewLocale } from "../utilities/locale/getPreviewLocale.js"
+import type { InlangProject } from "@inlang/sdk"
+import { getProjectRuntime } from "../utilities/project/projectRuntime.js"
 
-const showPreviewLocalePicker = async (locales: string[]): Promise<string | undefined> => {
-	const previewLocale = await getPreviewLocale()
+const showPreviewLocalePicker = async (
+	locales: string[],
+	project: InlangProject
+): Promise<string | undefined> => {
+	const previewLocale = await getPreviewLocale(project)
 	const quickPick = vscode.window.createQuickPick()
 	quickPick.placeholder = "Select a language"
 	quickPick.items = locales.map((locale) => ({ label: locale }))
@@ -30,10 +34,13 @@ export const previewLocaleCommand = {
 	title: "Sherlock: Change preview language tag",
 	register: vscode.commands.registerCommand,
 	callback: async () => {
-		const settings = await state().project?.settings.get()
-		const selectedLocale = await showPreviewLocalePicker(settings.locales)
+		const lease = getProjectRuntime<InlangProject>().activeProject()
+		if (!lease) return
+		const settings = await lease.runTask(() => lease.project.settings.get())
+		if (settings.status !== "completed") return
+		const selectedLocale = await showPreviewLocalePicker(settings.value.locales, lease.project)
 
-		if (!selectedLocale) {
+		if (!selectedLocale || !lease.isCurrent()) {
 			return
 		}
 

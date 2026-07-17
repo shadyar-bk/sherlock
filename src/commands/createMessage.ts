@@ -1,11 +1,11 @@
-import { state } from "../utilities/state.js"
 import { msg } from "../utilities/messages/msg.js"
 import { commands, window } from "vscode"
 import { capture } from "../services/telemetry/index.js"
-import { humanId, upsertBundleNested, type NewBundleNested } from "@inlang/sdk"
+import { humanId, upsertBundleNested, type InlangProject, type NewBundleNested } from "@inlang/sdk"
 import { CONFIGURATION } from "../configuration.js"
 import { getSetting } from "../utilities/settings/index.js"
 import { v4 as uuidv4 } from "uuid"
+import { getProjectRuntime } from "../utilities/project/projectRuntime.js"
 
 /**
  * Helps the user to create messages by prompting for the message content.
@@ -15,7 +15,13 @@ export const createMessageCommand = {
 	title: "Sherlock: Create Message",
 	register: commands.registerCommand,
 	callback: async function () {
-		const baseLocale = (await state().project.settings.get()).baseLocale
+		const lease = getProjectRuntime<InlangProject>().activeProject()
+		if (!lease) return msg("No active project.")
+		const baseLocaleResult = await lease.runTask(
+			async () => (await lease.project.settings.get()).baseLocale
+		)
+		if (baseLocaleResult.status !== "completed") return
+		const baseLocale = baseLocaleResult.value
 
 		const messageValue = await window.showInputBox({
 			title: "Enter the message content:",
@@ -67,7 +73,13 @@ export const createMessageCommand = {
 		}
 
 		try {
-			await upsertBundleNested(state().project?.db, bundle)
+			const created = await lease.runTask(async () => {
+				await upsertBundleNested(lease.project.db, bundle)
+				return true
+			})
+			if (created.status !== "completed") {
+				return msg("The active project changed before the message was created.")
+			}
 
 			// Emit event to notify that a message was created
 			CONFIGURATION.EVENTS.ON_DID_CREATE_MESSAGE.fire()

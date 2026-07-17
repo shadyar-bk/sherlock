@@ -2,7 +2,7 @@ type QueryFunction<T> = () => Promise<T>
 type Subscriber<T> = (value: T) => void
 
 interface Subscription {
-	unsubscribe: () => void
+	unsubscribe: () => Promise<void>
 }
 
 /**
@@ -17,30 +17,39 @@ export function pollQuery<T>(queryFn: QueryFunction<T>, interval: number = 2000)
 	return {
 		subscribe(subscriber: Subscriber<T>): Subscription {
 			let isDestroyed = false
+			let timeout: NodeJS.Timeout | undefined
+			let inFlight: Promise<void> | undefined
 
 			const executeQuery = async () => {
-				if (isDestroyed) return
-				try {
-					const result = await queryFn()
-					if (!isDestroyed) {
-						subscriber(result)
+				if (isDestroyed || inFlight) return
+				const execution = (async () => {
+					try {
+						const result = await queryFn()
+						if (!isDestroyed) {
+							subscriber(result)
+						}
+					} catch (error) {
+						if (!isDestroyed) console.error("Poll query error:", error)
+					} finally {
+						if (!isDestroyed) timeout = setTimeout(executeQuery, interval)
 					}
-				} catch (error) {
-					console.error("Poll query error:", error)
-				}
+				})()
+				inFlight = execution
+				await execution
+				if (inFlight === execution) inFlight = undefined
 			}
 
 			// Execute initial query
 			executeQuery()
 
-			// Set up polling interval
-			const intervalId = setInterval(executeQuery, interval)
-
 			// Return subscription object
 			return {
-				unsubscribe: () => {
+				unsubscribe: async () => {
 					isDestroyed = true
-					clearInterval(intervalId)
+					if (timeout) clearTimeout(timeout)
+					// Do not let the owning project close SQLite while this query is still using it.
+					// The pinned inlang/Kysely APIs do not expose cooperative query cancellation.
+					await inFlight
 				},
 			}
 		},
