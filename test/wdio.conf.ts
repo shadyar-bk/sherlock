@@ -3,19 +3,35 @@ import fs from "node:fs"
 import os from "node:os"
 import url from "node:url"
 import path from "node:path"
+import { pluginFixtureUrl, startPluginFixtureServer } from "./helpers/pluginFixtureServer.js"
+import { snapshotWorkspacePaths } from "./helpers/workspaceFixture.js"
 
 const debug = process.env.DEBUG
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url))
 const fixtureWorkspacePath = path.join(__dirname, "../examples/minimal")
 const providedWorkspacePath = process.env.SHERLOCK_E2E_WORKSPACE
+const providedChromedriverPath = process.env.SHERLOCK_E2E_CHROMEDRIVER
 const tempWorkspaceRoot = providedWorkspacePath
 	? undefined
 	: fs.mkdtempSync(path.join(os.tmpdir(), "sherlock-e2e-"))
 const e2eWorkspacePath = providedWorkspacePath ?? path.join(tempWorkspaceRoot!, "minimal")
+let pluginFixtureServer: Awaited<ReturnType<typeof startPluginFixtureServer>> | undefined
+let providedWorkspaceFixture: Awaited<ReturnType<typeof snapshotWorkspacePaths>> | undefined
 
 if (!providedWorkspacePath) {
 	fs.cpSync(fixtureWorkspacePath, e2eWorkspacePath, { recursive: true })
 	process.env.SHERLOCK_E2E_WORKSPACE = e2eWorkspacePath
+}
+
+function useLocalPluginFixtures() {
+	if (!pluginFixtureServer || providedWorkspacePath) return
+	const settingsPath = path.join(e2eWorkspacePath, "project.inlang/settings.json")
+	const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"))
+	settings.modules = [
+		pluginFixtureUrl(pluginFixtureServer.baseUrl, "json"),
+		pluginFixtureUrl(pluginFixtureServer.baseUrl, "t-function-matcher"),
+	]
+	fs.writeFileSync(settingsPath, `${JSON.stringify(settings, undefined, "\t")}\n`)
 }
 
 export const config: Options.Testrunner = {
@@ -81,6 +97,9 @@ export const config: Options.Testrunner = {
 		{
 			browserName: "vscode",
 			browserVersion: "stable", // also possible: "insiders" or a specific version e.g. "1.80.0"
+			...(providedChromedriverPath
+				? { "wdio:chromedriverOptions": { binary: providedChromedriverPath } }
+				: {}),
 			"wdio:vscodeOptions": {
 				verboseLogging: false,
 				// points to directory where extension package.json is located
@@ -186,8 +205,14 @@ export const config: Options.Testrunner = {
 	 * @param {object} config wdio configuration object
 	 * @param {Array.<Object>} capabilities list of capabilities details
 	 */
-	// onPrepare: function (config, capabilities) {
-	// },
+	onPrepare: async function () {
+		if (providedWorkspacePath) {
+			providedWorkspaceFixture = await snapshotWorkspacePaths([providedWorkspacePath])
+		}
+		pluginFixtureServer = await startPluginFixtureServer()
+		process.env.SHERLOCK_E2E_PLUGIN_BASE_URL = pluginFixtureServer.baseUrl
+		useLocalPluginFixtures()
+	},
 	/**
 	 * Gets executed before a worker process is spawned and can be used to initialize specific service
 	 * for that worker as well as modify runtime environments in an async fashion.
@@ -210,6 +235,7 @@ export const config: Options.Testrunner = {
 		if (providedWorkspacePath) return
 		fs.rmSync(e2eWorkspacePath, { recursive: true, force: true })
 		fs.cpSync(fixtureWorkspacePath, e2eWorkspacePath, { recursive: true })
+		useLocalPluginFixtures()
 	},
 	/**
 	 * Gets executed just before initialising the webdriver session and test framework. It allows you
@@ -315,7 +341,11 @@ export const config: Options.Testrunner = {
 	 */
 	// onComplete: function(exitCode, config, capabilities, results) {
 	// },
-	onComplete: function () {
+	onComplete: async function () {
+		await pluginFixtureServer?.close()
+		pluginFixtureServer = undefined
+		await providedWorkspaceFixture?.restore()
+		providedWorkspaceFixture = undefined
 		if (tempWorkspaceRoot) {
 			fs.rmSync(tempWorkspaceRoot, { recursive: true, force: true })
 		}

@@ -3,6 +3,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import vscode from "vscode"
 import {} from "wdio-vscode-service"
+import { e2ePluginFixtureUrl } from "../helpers/pluginFixtureServer.js"
 
 const workspacePath =
 	process.env.SHERLOCK_E2E_WORKSPACE ?? path.join(process.cwd(), "examples/minimal")
@@ -14,10 +15,7 @@ const originalSettings = {
 	$schema: "https://inlang.com/schema/project-settings",
 	baseLocale: "en",
 	locales: ["en", "de"],
-	modules: [
-		"https://cdn.jsdelivr.net/npm/@inlang/plugin-json@4/dist/index.js",
-		"https://cdn.jsdelivr.net/npm/@inlang/plugin-t-function-matcher@2/dist/index.js",
-	],
+	modules: [e2ePluginFixtureUrl("json"), e2ePluginFixtureUrl("t-function-matcher")],
 	"plugin.inlang.json": {
 		pathPattern: "./messages/{languageTag}.json",
 		variableReferencePattern: ["{", "}"],
