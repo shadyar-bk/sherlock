@@ -84,6 +84,19 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 	const pendingUserReplacementGenerations = new Set<number>()
 	const cleanupGraceMs = args.cleanupGraceMs ?? DEFAULT_CLEANUP_GRACE_MS
 
+	async function waitForCleanup(work: Promise<void>) {
+		let timeout: ReturnType<typeof setTimeout> | undefined
+		const graceElapsed = new Promise<false>((resolve) => {
+			timeout = setTimeout(() => resolve(false), cleanupGraceMs)
+		})
+		try {
+			const completed = await Promise.race([work.then(() => true as const), graceElapsed])
+			if (!completed) void work.catch((error) => reportError(error, "cleanup"))
+		} finally {
+			if (timeout) clearTimeout(timeout)
+		}
+	}
+
 	function createSession(path: string, project: Project, sessionGeneration: number) {
 		let resources: Disposable[] = []
 		let sessionDisposed = false
@@ -192,23 +205,7 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 					}
 				})()
 
-				disposal = (async () => {
-					let timeout: ReturnType<typeof setTimeout> | undefined
-					const graceElapsed = new Promise<false>((resolve) => {
-						timeout = setTimeout(() => resolve(false), cleanupGraceMs)
-					})
-					try {
-						const finalized = await Promise.race([
-							finalization!.then(() => true as const),
-							graceElapsed,
-						])
-						if (!finalized) {
-							void finalization!.catch((error) => reportError(error, "cleanup"))
-						}
-					} finally {
-						if (timeout) clearTimeout(timeout)
-					}
-				})()
+				disposal = waitForCleanup(finalization)
 				return disposal
 			},
 		}
@@ -388,7 +385,7 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 			} catch (error) {
 				errors.push(error)
 			}
-			disposal = (async () => {
+			const finalization = (async () => {
 				await Promise.allSettled([...replacements])
 				await commitQueue
 				const previousResult = await previousDisposal
@@ -397,6 +394,7 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 					throw new AggregateError(errors, "Failed to dispose project lifecycle")
 				}
 			})()
+			disposal = waitForCleanup(finalization)
 			return disposal
 		},
 	}

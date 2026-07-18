@@ -734,6 +734,31 @@ describe("project session lifecycle", () => {
 		await disposal
 	})
 
+	it("bounds deactivation while a project replacement never settles", async () => {
+		vi.useFakeTimers()
+		const loading = deferred<ReturnType<typeof fakeProject>>()
+		const setActiveSession = vi.fn()
+		const lifecycle = createProjectSessionLifecycle<ReturnType<typeof fakeProject>>({
+			loadProject: () => loading.promise,
+			prepareSession: vi.fn(async () => preparedSession()),
+			setActiveSession,
+			cleanupGraceMs: 100,
+		})
+		void lifecycle.replaceProject("/blocked.inlang")
+
+		let disposed = false
+		const disposal = lifecycle.dispose().then(() => {
+			disposed = true
+		})
+		await vi.advanceTimersByTimeAsync(99)
+		expect(disposed).toBe(false)
+
+		await vi.advanceTimersByTimeAsync(1)
+		await disposal
+		expect(disposed).toBe(true)
+		expect(setActiveSession).toHaveBeenCalledWith(undefined)
+	})
+
 	it("observes immediate cleanup failures while an in-flight replacement settles", async () => {
 		const active = fakeProject("active")
 		const candidate = fakeProject("candidate")
