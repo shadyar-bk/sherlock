@@ -18,6 +18,8 @@ import {
 	setupPluginResourceWatcher,
 } from "./utilities/fs/pluginResourceWatcher.js"
 
+const createOpenEditorViewCallback = vi.hoisted(() => vi.fn(() => vi.fn()))
+
 vi.mock("vscode", () => ({
 	version: "1.90.0",
 	commands: {
@@ -61,6 +63,11 @@ vi.mock("fast-glob", () => ({
 vi.mock("./configuration.js", () => ({
 	CONFIGURATION: {
 		COMMANDS: {
+			OPEN_EDITOR_VIEW: {
+				command: "sherlock.openEditorView",
+				createCallback: createOpenEditorViewCallback,
+				register: vi.fn(() => ({ dispose: vi.fn() })),
+			},
 			RELOAD: {
 				command: "sherlock.reloadProject",
 				callback: vi.fn(),
@@ -234,7 +241,10 @@ describe("discoverProjectsInWorkspace", () => {
 			errors: { get: vi.fn(async () => []) },
 			close: vi.fn(async () => undefined),
 		}
-		const context = { subscriptions: [] } as unknown as vscode.ExtensionContext
+		const context = {
+			subscriptions: [],
+			extensionUri: { fsPath: "/extension" },
+		} as unknown as vscode.ExtensionContext
 		vi.mocked(fg.async).mockResolvedValueOnce(["/workspace/project.inlang"])
 		vi.mocked(closestInlangProject).mockResolvedValueOnce({
 			projectPath: "/workspace/project.inlang",
@@ -249,6 +259,15 @@ describe("discoverProjectsInWorkspace", () => {
 		expect(createResourceLoadTracker).toHaveBeenCalledTimes(2)
 		expect(projectView).toHaveBeenCalledTimes(1)
 		expect(messageView).toHaveBeenCalledTimes(1)
+		expect(messageView).toHaveBeenCalledWith({
+			workspaceFolder,
+			extensionUri: context.extensionUri,
+			subscriptions: context.subscriptions,
+		})
+		expect(createOpenEditorViewCallback).toHaveBeenCalledOnce()
+		expect(createOpenEditorViewCallback).toHaveBeenCalledWith({
+			extensionUri: context.extensionUri,
+		})
 		expect(errorView).toHaveBeenCalledTimes(1)
 		expect(recommendationBannerView).toHaveBeenCalledTimes(1)
 		expect(firstProject.close).toHaveBeenCalledTimes(1)

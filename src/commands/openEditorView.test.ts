@@ -1,47 +1,70 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
+import type * as vscode from "vscode"
 import { editorView } from "../utilities/editor/editorView.js"
-import { openEditorViewCommand } from "./openEditorView.js"
-
-const lease = vi.hoisted(() => ({
-	own: vi.fn(),
-}))
+import { capture } from "../services/telemetry/index.js"
+import { createOpenEditorViewCallback, openEditorViewCommand } from "./openEditorView.js"
 
 vi.mock("vscode", () => ({
 	commands: { registerCommand: vi.fn() },
-	extensions: {
-		getExtension: vi.fn(() => ({ extensionUri: { fsPath: "/extension" } })),
-	},
 }))
 
 vi.mock("../utilities/editor/editorView.js", () => ({
 	editorView: vi.fn(),
 }))
 
-vi.mock("../utilities/project/projectRuntime.js", () => ({
-	getProjectRuntime: () => ({ activeProject: () => lease }),
+vi.mock("../services/telemetry/index.js", () => ({
+	capture: vi.fn(),
 }))
-
-vi.mock("../services/telemetry/index.js", () => ({ capture: vi.fn() }))
 
 describe("Open Editor command", () => {
 	beforeEach(() => {
 		vi.clearAllMocks()
-		lease.own.mockReturnValue(true)
 	})
 
-	it("retires the editor without exporting the replaced project", async () => {
+	it("opens the requested bundle without exporting it when the session retires", async () => {
+		const extensionUri = { fsPath: "/extension" } as vscode.Uri
 		const editor = {
 			createOrShowPanel: vi.fn(async () => undefined),
 			dispose: vi.fn(async () => undefined),
 		}
+		const lease = {
+			own: vi.fn((_resource: { dispose(): Promise<void> }) => true),
+		}
 		vi.mocked(editorView).mockReturnValue(editor as never)
+		const callback = createOpenEditorViewCallback({
+			extensionUri,
+			activeProject: () => lease as never,
+		})
 
-		await openEditorViewCommand.callback({ bundleId: "welcome" })
+		await callback({ bundleId: "welcome" })
 
+		expect(openEditorViewCommand.command).toBe("sherlock.openEditorView")
+		expect(editorView).toHaveBeenCalledWith({
+			extensionUri,
+			lease,
+			initialBundleId: "welcome",
+		})
+		expect(lease.own).toHaveBeenCalledOnce()
 		const ownedResource = lease.own.mock.calls[0]?.[0]
-		await ownedResource.dispose()
-
+		await ownedResource?.dispose()
 		expect(editor.dispose).toHaveBeenCalledWith()
+		expect(editor.createOrShowPanel).toHaveBeenCalledOnce()
+		expect(capture).toHaveBeenCalledWith({
+			event: "IDE-EXTENSION Editor View opened",
+			properties: { bundleId: "welcome" },
+		})
+	})
+
+	it("does nothing when there is no active project", async () => {
+		const callback = createOpenEditorViewCallback({
+			extensionUri: { fsPath: "/extension" } as vscode.Uri,
+			activeProject: () => undefined,
+		})
+
+		await expect(callback({ bundleId: "welcome" })).resolves.toBeUndefined()
+
+		expect(editorView).not.toHaveBeenCalled()
+		expect(capture).not.toHaveBeenCalled()
 	})
 
 	it("exports a focused editor when the extension shuts down", async () => {

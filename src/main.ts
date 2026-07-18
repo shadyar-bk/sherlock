@@ -77,7 +77,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		registerGlobalCommands(context)
 		let messageController: MessageViewController | undefined
 		if (state().projectsInWorkspace.length > 0) {
-			messageController = await messageView({ context, workspaceFolder })
+			messageController = await messageView({
+				workspaceFolder,
+				extensionUri: context.extensionUri,
+				subscriptions: context.subscriptions,
+			})
 		}
 		const resourceLoadSnapshots = new WeakMap<
 			InlangProject,
@@ -187,9 +191,13 @@ async function activateInitialProjectSession(args: {
 
 function registerGlobalCommands(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
-		...Object.values(CONFIGURATION.COMMANDS).map((command) =>
-			command.register(command.command, command.callback as any)
-		),
+		...Object.values(CONFIGURATION.COMMANDS).map((command) => {
+			const callback =
+				"createCallback" in command
+					? command.createCallback({ extensionUri: context.extensionUri })
+					: command.callback
+			return command.register(command.command, callback as any)
+		}),
 		CONFIGURATION.EVENTS.ON_DID_PROJECT_CHANGE.event(() => {
 			CONFIGURATION.EVENTS.ON_DID_PROJECT_TREE_VIEW_CHANGE.fire(undefined)
 			CONFIGURATION.EVENTS.ON_DID_ERROR_TREE_VIEW_CHANGE.fire(undefined)
