@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import { pollQuery } from "../polling/pollQuery.js"
 import { createProjectSessionLifecycle, deactivateBeforeClose } from "./projectSession.js"
 
 function deferred<T>() {
@@ -21,6 +22,10 @@ function fakeProject(name: string) {
 function preparedSession() {
 	return { activate: () => undefined }
 }
+
+afterEach(() => {
+	vi.useRealTimers()
+})
 
 describe("project session lifecycle", () => {
 	it("accepts reconciliation requested while the session's own commit is finishing", async () => {
@@ -651,6 +656,215 @@ describe("project session lifecycle", () => {
 		const staleWork = vi.fn(async () => "stale")
 		expect(await firstSession.runTask(staleWork)).toEqual({ status: "inactive" })
 		expect(staleWork).not.toHaveBeenCalled()
+	})
+
+	it("bounds lifecycle disposal without closing a project used by unresolved work", async () => {
+		vi.useFakeTimers()
+		const runningTask = deferred<void>()
+		const project = fakeProject("active")
+		const resource = { dispose: vi.fn() }
+		let session: any
+		const lifecycle = createProjectSessionLifecycle<ReturnType<typeof fakeProject>>({
+			loadProject: vi.fn(async () => project),
+			prepareSession: vi.fn(async (_session, resources) => {
+				resources.push(resource)
+				return preparedSession()
+			}),
+			setActiveSession: (value) => {
+				session = value
+			},
+			cleanupGraceMs: 100,
+		})
+		await lifecycle.replaceProject("/active.inlang")
+		const task = session.runTask(() => runningTask.promise)
+
+		const disposal = lifecycle.dispose()
+		expect(lifecycle.dispose()).toBe(disposal)
+		let disposalSettled = false
+		void disposal.then(() => {
+			disposalSettled = true
+		})
+		await vi.advanceTimersByTimeAsync(99)
+		expect(disposalSettled).toBe(false)
+		expect(project.close).not.toHaveBeenCalled()
+
+		await vi.advanceTimersByTimeAsync(1)
+		await disposal
+		expect(resource.dispose).not.toHaveBeenCalled()
+		expect(project.close).not.toHaveBeenCalled()
+
+		runningTask.resolve()
+		await task
+		await vi.waitFor(() => expect(project.close).toHaveBeenCalledTimes(1))
+		expect(resource.dispose).toHaveBeenCalledTimes(1)
+		expect(resource.dispose.mock.invocationCallOrder[0]).toBeLessThan(
+			project.close.mock.invocationCallOrder[0]!
+		)
+	})
+
+	it("deactivates the published session before awaiting an in-flight replacement", async () => {
+		const active = fakeProject("active")
+		const candidate = fakeProject("candidate")
+		const candidateLoad = deferred<typeof candidate>()
+		const earlyDeactivate = vi.fn()
+		let session: any
+		const lifecycle = createProjectSessionLifecycle<ReturnType<typeof fakeProject>>({
+			loadProject: vi.fn().mockResolvedValueOnce(active).mockReturnValueOnce(candidateLoad.promise),
+			prepareSession: vi.fn(async (value, resources) => {
+				if (value.project === active) {
+					resources.push({ deactivate: earlyDeactivate, dispose: vi.fn() })
+				}
+				return preparedSession()
+			}),
+			setActiveSession: (value) => {
+				if (value?.project === active) session = value
+			},
+		})
+		await lifecycle.replaceProject("/active.inlang")
+		const replacement = lifecycle.replaceProject("/candidate.inlang")
+
+		const disposal = lifecycle.dispose()
+
+		expect(earlyDeactivate).toHaveBeenCalledTimes(1)
+		expect(await session.runTask(async () => "stale")).toEqual({ status: "inactive" })
+		expect(session.own({ dispose: vi.fn() })).toBe(false)
+
+		candidateLoad.resolve(candidate)
+		expect(await replacement).toEqual({ status: "superseded" })
+		await disposal
+	})
+
+	it("observes immediate cleanup failures while an in-flight replacement settles", async () => {
+		const active = fakeProject("active")
+		const candidate = fakeProject("candidate")
+		const candidateLoad = deferred<typeof candidate>()
+		const cleanupError = new Error("cleanup failed")
+		const lifecycle = createProjectSessionLifecycle<ReturnType<typeof fakeProject>>({
+			loadProject: vi.fn().mockResolvedValueOnce(active).mockReturnValueOnce(candidateLoad.promise),
+			prepareSession: vi.fn(async (session, resources) => {
+				if (session.project === active) {
+					resources.push({ dispose: () => Promise.reject(cleanupError) })
+				}
+				return preparedSession()
+			}),
+			setActiveSession: vi.fn(),
+		})
+		await lifecycle.replaceProject("/active.inlang")
+		const replacement = lifecycle.replaceProject("/candidate.inlang")
+
+		const disposal = lifecycle.dispose()
+		await Promise.resolve()
+		candidateLoad.resolve(candidate)
+
+		expect(await replacement).toEqual({ status: "superseded" })
+		await expect(disposal).rejects.toMatchObject({
+			message: "Failed to dispose project lifecycle",
+		})
+		expect(active.close).toHaveBeenCalledTimes(1)
+	})
+
+	it("commits a replacement after grace and finalizes the retained project exactly once", async () => {
+		vi.useFakeTimers()
+		const runningTask = deferred<void>()
+		const first = fakeProject("first")
+		const second = fakeProject("second")
+		let firstSession: any
+		let activeProject: typeof first | undefined
+		const lifecycle = createProjectSessionLifecycle<ReturnType<typeof fakeProject>>({
+			loadProject: vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second),
+			prepareSession: vi.fn(async () => preparedSession()),
+			setActiveSession: (session) => {
+				activeProject = session?.project
+				if (session?.project === first) firstSession = session
+			},
+			cleanupGraceMs: 100,
+		})
+		await lifecycle.replaceProject("/first.inlang")
+		const task = firstSession.runTask(() => runningTask.promise)
+
+		const replacement = lifecycle.replaceProject("/second.inlang")
+		await vi.advanceTimersByTimeAsync(100)
+
+		expect(await replacement).toEqual({ status: "committed" })
+		expect(activeProject).toBe(second)
+		expect(first.close).not.toHaveBeenCalled()
+		expect(await firstSession.runTask(async () => "stale")).toEqual({ status: "inactive" })
+
+		runningTask.resolve()
+		await task
+		await vi.waitFor(() => expect(first.close).toHaveBeenCalledTimes(1))
+		await lifecycle.dispose()
+		expect(first.close).toHaveBeenCalledTimes(1)
+		expect(second.close).toHaveBeenCalledTimes(1)
+	})
+
+	it("reports a detached finalizer failure through the cleanup error channel", async () => {
+		vi.useFakeTimers()
+		const runningTask = deferred<void>()
+		const taskError = new Error("late task failure")
+		const project = fakeProject("active")
+		const onError = vi.fn()
+		let session: any
+		const lifecycle = createProjectSessionLifecycle<ReturnType<typeof fakeProject>>({
+			loadProject: vi.fn(async () => project),
+			prepareSession: vi.fn(async () => preparedSession()),
+			setActiveSession: (value) => {
+				session = value
+			},
+			onError,
+			cleanupGraceMs: 100,
+		})
+		await lifecycle.replaceProject("/active.inlang")
+		void session.runTask(() => runningTask.promise).catch(() => undefined)
+
+		const disposal = lifecycle.dispose()
+		await vi.advanceTimersByTimeAsync(100)
+		await disposal
+		runningTask.reject(taskError)
+
+		await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1))
+		expect(onError).toHaveBeenCalledWith(
+			expect.objectContaining({ message: "Failed to dispose project session" }),
+			"cleanup"
+		)
+		expect(project.close).toHaveBeenCalledTimes(1)
+	})
+
+	it("bounds a never-settling poll while suppressing late view delivery", async () => {
+		vi.useFakeTimers()
+		const queryResult = deferred<string[]>()
+		const project = fakeProject("active")
+		const subscriber = vi.fn()
+		const query = vi.fn(() => queryResult.promise)
+		let session: any
+		const lifecycle = createProjectSessionLifecycle<ReturnType<typeof fakeProject>>({
+			loadProject: vi.fn(async () => project),
+			prepareSession: vi.fn(async () => preparedSession()),
+			setActiveSession: (value) => {
+				session = value
+			},
+			cleanupGraceMs: 100,
+		})
+		await lifecycle.replaceProject("/active.inlang")
+		const subscription = pollQuery(async () => {
+			const result = await session.runTask(query)
+			return result.status === "completed" ? result.value : []
+		}, 50).subscribe(subscriber)
+		expect(session.own(deactivateBeforeClose({ dispose: () => subscription.unsubscribe() }))).toBe(
+			true
+		)
+		expect(query).toHaveBeenCalledTimes(1)
+
+		const disposal = lifecycle.dispose()
+		await vi.advanceTimersByTimeAsync(100)
+		await disposal
+		expect(project.close).not.toHaveBeenCalled()
+
+		queryResult.resolve(["stale"])
+		await vi.waitFor(() => expect(project.close).toHaveBeenCalledTimes(1))
+		await vi.advanceTimersByTimeAsync(500)
+		expect(query).toHaveBeenCalledTimes(1)
+		expect(subscriber).not.toHaveBeenCalled()
 	})
 
 	it("distinguishes a completed undefined value from inactive work", async () => {

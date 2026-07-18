@@ -48,6 +48,10 @@ export type ProjectReplacementResult =
 const COMMITTED = { status: "committed" } as const
 const SUPERSEDED = { status: "superseded" } as const
 
+// Keep extension reload and shutdown responsive without closing a project that
+// may still be used by its already-running work.
+const DEFAULT_CLEANUP_GRACE_MS = 1_000
+
 export type PreparedProjectSession = {
 	activate(): void
 	afterPreviousDisposed?(): Promise<void> | void
@@ -65,6 +69,7 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 		error: unknown,
 		phase: "cleanup" | "activation" | "notification" | "reconciliation"
 	): void
+	cleanupGraceMs?: number
 }) {
 	let activeSession:
 		| (ProjectSession<Project> & {
@@ -77,6 +82,7 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 	let commitQueue = Promise.resolve()
 	const replacements = new Set<Promise<ProjectReplacementResult>>()
 	const pendingUserReplacementGenerations = new Set<number>()
+	const cleanupGraceMs = args.cleanupGraceMs ?? DEFAULT_CLEANUP_GRACE_MS
 
 	function createSession(path: string, project: Project, sessionGeneration: number) {
 		let resources: Disposable[] = []
@@ -84,6 +90,8 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 		let active = false
 		let reconciliationInFlight = false
 		const tasks = new Set<Promise<unknown>>()
+		let finalization: Promise<void> | undefined
+		let disposal: Promise<void> | undefined
 		let session: ProjectSession<Project> & {
 			resources: Disposable[]
 			activate(): void
@@ -134,8 +142,8 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 				scheduleReconciliation()
 				return { status: "scheduled" }
 			},
-			async dispose(reason: ProjectSessionDisposalReason = "replacement") {
-				if (sessionDisposed) return
+			dispose(reason: ProjectSessionDisposalReason = "replacement") {
+				if (disposal) return disposal
 				sessionDisposed = true
 				active = false
 				const errors: unknown[] = []
@@ -155,30 +163,53 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 						errors.push(error)
 					}
 				}
-				const taskResults = await Promise.allSettled([...tasks])
-				for (const result of taskResults) {
-					if (result.status === "rejected") errors.push(result.reason)
-				}
-				for (let index = resources.length - 1; index >= 0; index -= 1) {
-					const resource = resources[index]!
-					const earlyDisposal = earlyDisposals.get(resource)
-					if (earlyDisposal) {
-						const result = await earlyDisposal
+				finalization = (async () => {
+					const taskResults = await Promise.allSettled([...tasks])
+					for (const result of taskResults) {
 						if (result.status === "rejected") errors.push(result.reason)
-						continue
+					}
+					for (let index = resources.length - 1; index >= 0; index -= 1) {
+						const resource = resources[index]!
+						const earlyDisposal = earlyDisposals.get(resource)
+						if (earlyDisposal) {
+							const result = await earlyDisposal
+							if (result.status === "rejected") errors.push(result.reason)
+							continue
+						}
+						try {
+							await resource.dispose(reason)
+						} catch (error) {
+							errors.push(error)
+						}
 					}
 					try {
-						await resource.dispose(reason)
+						await project.close()
 					} catch (error) {
 						errors.push(error)
 					}
-				}
-				try {
-					await project.close()
-				} catch (error) {
-					errors.push(error)
-				}
-				if (errors.length > 0) throw new AggregateError(errors, "Failed to dispose project session")
+					if (errors.length > 0) {
+						throw new AggregateError(errors, "Failed to dispose project session")
+					}
+				})()
+
+				disposal = (async () => {
+					let timeout: ReturnType<typeof setTimeout> | undefined
+					const graceElapsed = new Promise<false>((resolve) => {
+						timeout = setTimeout(() => resolve(false), cleanupGraceMs)
+					})
+					try {
+						const finalized = await Promise.race([
+							finalization!.then(() => true as const),
+							graceElapsed,
+						])
+						if (!finalized) {
+							void finalization!.catch((error) => reportError(error, "cleanup"))
+						}
+					} finally {
+						if (timeout) clearTimeout(timeout)
+					}
+				})()
+				return disposal
 			},
 		}
 		return session
@@ -340,22 +371,28 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 			if (disposal) return disposal
 			disposed = true
 			generation += 1
+			const previous = activeSession
+			activeSession = undefined
+			const errors: unknown[] = []
+			try {
+				args.setActiveSession(undefined)
+			} catch (error) {
+				errors.push(error)
+			}
+			let previousDisposal: Promise<PromiseSettledResult<void>> | undefined
+			try {
+				previousDisposal = previous?.dispose("shutdown").then(
+					() => ({ status: "fulfilled", value: undefined }),
+					(reason) => ({ status: "rejected", reason })
+				)
+			} catch (error) {
+				errors.push(error)
+			}
 			disposal = (async () => {
 				await Promise.allSettled([...replacements])
 				await commitQueue
-				const previous = activeSession
-				activeSession = undefined
-				const errors: unknown[] = []
-				try {
-					args.setActiveSession(undefined)
-				} catch (error) {
-					errors.push(error)
-				}
-				try {
-					await previous?.dispose("shutdown")
-				} catch (error) {
-					errors.push(error)
-				}
+				const previousResult = await previousDisposal
+				if (previousResult?.status === "rejected") errors.push(previousResult.reason)
 				if (errors.length > 0) {
 					throw new AggregateError(errors, "Failed to dispose project lifecycle")
 				}
