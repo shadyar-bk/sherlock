@@ -3,26 +3,13 @@ import * as _path from "node:path"
 
 export type FileSystem = typeof fs
 
-export type FileSystemMutation =
-	| {
-			type: "write"
-			path: string
-			data: Parameters<FileSystem["writeFile"]>[1]
-			options: Parameters<FileSystem["writeFile"]>[2]
-	  }
-	| { type: "delete"; path: string; recursive: boolean }
-
 /**
  * Map file system paths to a base path.
  * @param base The base path to map to.
  * @param fs The file system to map.
  * @returns The mapped file system.
  */
-export function createFileSystemMapper(
-	base: string,
-	fs: FileSystem,
-	onDidMutate?: (mutation: FileSystemMutation) => Promise<void> | void
-): FileSystem {
+export function createFileSystemMapper(base: string, fs: FileSystem): FileSystem {
 	// Prevent path issue on non Unix based system normalizing the <base> before using it
 	const normalizedBase = _path.normalize(base)
 	const resolveMappedPath = (filePath: Parameters<FileSystem["readFile"]>[0]) =>
@@ -39,44 +26,20 @@ export function createFileSystemMapper(
 			path: Parameters<FileSystem["readFile"]>[0],
 			options: Parameters<FileSystem["readFile"]>[1]
 		): Promise<string | Uint8Array> => fs.readFile(resolveMappedPath(path), options),
-		writeFile: async (
+		writeFile: (
 			path: Parameters<FileSystem["writeFile"]>[0],
 			data: Parameters<FileSystem["writeFile"]>[1],
 			options: Parameters<FileSystem["writeFile"]>[2]
-		) => {
-			const normalizedPath = resolveMappedPath(path)
-			await fs.writeFile(normalizedPath, data, options)
-			await onDidMutate?.({
-				type: "write",
-				path: normalizedPath,
-				data,
-				options,
-			})
-		},
+		) => fs.writeFile(resolveMappedPath(path), data, options),
 		// @ts-expect-error
 		mkdir: async (
 			path: Parameters<FileSystem["mkdir"]>[0],
 			options?: Parameters<FileSystem["mkdir"]>[1]
 		) => fs.mkdir(resolveMappedPath(path), options),
-		rmdir: async (path: Parameters<FileSystem["rmdir"]>[0]) => {
-			const normalizedPath = resolveMappedPath(path)
-			await fs.rmdir(normalizedPath)
-			await onDidMutate?.({ type: "delete", path: normalizedPath, recursive: false })
-		},
-		rm: async (path: Parameters<FileSystem["rm"]>[0], options: Parameters<FileSystem["rm"]>[1]) => {
-			const normalizedPath = resolveMappedPath(path)
-			await fs.rm(normalizedPath, options)
-			await onDidMutate?.({
-				type: "delete",
-				path: normalizedPath,
-				recursive: options?.recursive === true,
-			})
-		},
-		unlink: async (path: Parameters<FileSystem["unlink"]>[0]) => {
-			const normalizedPath = resolveMappedPath(path)
-			await fs.unlink(normalizedPath)
-			await onDidMutate?.({ type: "delete", path: normalizedPath, recursive: false })
-		},
+		rmdir: (path: Parameters<FileSystem["rmdir"]>[0]) => fs.rmdir(resolveMappedPath(path)),
+		rm: (path: Parameters<FileSystem["rm"]>[0], options: Parameters<FileSystem["rm"]>[1]) =>
+			fs.rm(resolveMappedPath(path), options),
+		unlink: (path: Parameters<FileSystem["unlink"]>[0]) => fs.unlink(resolveMappedPath(path)),
 		// @ts-expect-error
 		readdir: async (path: Parameters<FileSystem["readdir"]>[0]) =>
 			fs.readdir(resolveMappedPath(path)),

@@ -3,7 +3,7 @@ export type ProjectSession<Project extends { close(): Promise<void> }> = {
 	readonly project: Project
 	own(resource: Disposable): boolean
 	runTask<T>(task: () => Promise<T>): Promise<ProjectTaskResult<T>>
-	requestReconciliation(options?: { deferStart?: boolean }): ProjectReconciliationRequestResult
+	requestReconciliation(): ProjectReconciliationRequestResult
 }
 
 export type ProjectTaskResult<T> = { status: "completed"; value: T } | { status: "inactive" }
@@ -69,9 +69,6 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 	let activeSession:
 		| (ProjectSession<Project> & {
 				dispose(reason?: ProjectSessionDisposalReason): Promise<void>
-				markReconciliationDirty(): void
-				flushDirtyReconciliation(): void
-				takeReconciliationDirty(): boolean
 		  })
 		| undefined
 	let disposed = false
@@ -85,16 +82,11 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 		let resources: Disposable[] = []
 		let sessionDisposed = false
 		let active = false
-		let reconciliationDirty = false
-		let reconciliationStartDeferred = false
 		let reconciliationInFlight = false
 		const tasks = new Set<Promise<unknown>>()
 		let session: ProjectSession<Project> & {
 			resources: Disposable[]
 			activate(): void
-			markReconciliationDirty(): void
-			flushDirtyReconciliation(): void
-			takeReconciliationDirty(): boolean
 			dispose(reason?: ProjectSessionDisposalReason): Promise<void>
 		}
 		const hasNewerUserReplacement = () =>
@@ -102,17 +94,13 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 				(replacementGeneration) => replacementGeneration > sessionGeneration
 			)
 		const scheduleReconciliation = () => {
-			reconciliationDirty = false
-			reconciliationStartDeferred = false
 			reconciliationInFlight = true
 			void trackReplacement(path, session)
 				.then((result) => {
 					if (result.status === "failed") reportError(result.error, "reconciliation")
-					if (result.status === "superseded") session.markReconciliationDirty()
 				})
 				.finally(() => {
 					reconciliationInFlight = false
-					session.flushDirtyReconciliation()
 				})
 		}
 		session = {
@@ -139,48 +127,12 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 					tasks.delete(execution)
 				}
 			},
-			requestReconciliation(options) {
+			requestReconciliation() {
 				if (!active || sessionDisposed || activeSession !== session) return SUPERSEDED
-				if (options?.deferStart) {
-					reconciliationDirty = true
-					reconciliationStartDeferred = true
-					return { status: "deferred" }
-				}
-				reconciliationStartDeferred = false
-				if (hasNewerUserReplacement()) {
-					reconciliationDirty = true
-					return { status: "deferred" }
-				}
-				if (reconciliationInFlight) {
-					reconciliationDirty = true
-					return { status: "scheduled" }
-				}
+				if (hasNewerUserReplacement()) return { status: "deferred" }
+				if (reconciliationInFlight) return { status: "scheduled" }
 				scheduleReconciliation()
 				return { status: "scheduled" }
-			},
-			markReconciliationDirty() {
-				reconciliationDirty = true
-				reconciliationStartDeferred = false
-			},
-			flushDirtyReconciliation() {
-				if (
-					!reconciliationDirty ||
-					reconciliationStartDeferred ||
-					!active ||
-					sessionDisposed ||
-					activeSession !== session ||
-					hasNewerUserReplacement() ||
-					reconciliationInFlight
-				) {
-					return
-				}
-				scheduleReconciliation()
-			},
-			takeReconciliationDirty() {
-				const dirty = reconciliationDirty
-				reconciliationDirty = false
-				reconciliationStartDeferred = false
-				return dirty
 			},
 			async dispose(reason: ProjectSessionDisposalReason = "replacement") {
 				if (sessionDisposed) return
@@ -341,9 +293,6 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 				return { status: "failed", error } as const
 			}
 			activeSession = candidate
-			if (previous?.path === candidate.path && previous.takeReconciliationDirty()) {
-				candidate.markReconciliationDirty()
-			}
 			try {
 				await previous?.dispose("replacement")
 			} catch (error) {
@@ -380,7 +329,6 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 			.finally(() => {
 				replacements.delete(replacement)
 				pendingUserReplacementGenerations.delete(replacementGeneration)
-				activeSession?.flushDirtyReconciliation()
 			})
 			.catch(() => undefined)
 		return replacement

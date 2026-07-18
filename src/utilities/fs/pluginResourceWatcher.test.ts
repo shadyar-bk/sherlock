@@ -3,10 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import {
 	createResourceLoadTracker,
 	discoverPluginResourceDescriptors,
-	runWithPluginResourceWrite,
 	setupPluginResourceWatcher,
 } from "./pluginResourceWatcher.js"
-import { createFileSystemMapper } from "./createFileSystemMapper.js"
 
 const mocks = vi.hoisted(() => {
 	type Uri = { fsPath: string }
@@ -112,11 +110,7 @@ function createWatcherSession(descriptors: Array<{ path: string; locale: string 
 }
 
 function expectReconciliationRuns(session: ReturnType<typeof createWatcherSession>, count: number) {
-	expect(
-		session.requestReconciliation.mock.calls.filter(
-			([options]: [{ deferStart?: boolean }?]) => !options?.deferStart
-		)
-	).toHaveLength(count)
+	expect(session.requestReconciliation).toHaveBeenCalledTimes(count)
 }
 
 afterEach(() => {
@@ -522,7 +516,7 @@ describe("plugin resource watcher", () => {
 		expect(mocks.watchers[0]?.dispose).toHaveBeenCalledOnce()
 	})
 
-	it("records confirmed dirty work before its debounce timer can be disposed", async () => {
+	it("requests one reconciliation only after the debounce expires", async () => {
 		vi.useFakeTimers()
 		const resourcePath = path.join(path.sep, "workspace", "translations", "en.json")
 		mocks.contents.set(resourcePath, new TextEncoder().encode("initial"))
@@ -532,15 +526,13 @@ describe("plugin resource watcher", () => {
 		mocks.contents.set(resourcePath, new TextEncoder().encode("changed"))
 		mocks.watchers[0]?.callbacks.change?.({ fsPath: resourcePath })
 		await vi.advanceTimersByTimeAsync(0)
-		expect(session.requestReconciliation).toHaveBeenCalledWith({ deferStart: true })
 		expectReconciliationRuns(session, 0)
 
 		await vi.advanceTimersByTimeAsync(149)
-		expect(session.requestReconciliation).toHaveBeenCalledTimes(1)
 		expectReconciliationRuns(session, 0)
 		await vi.advanceTimersByTimeAsync(1)
-		expect(session.requestReconciliation).toHaveBeenNthCalledWith(2)
 		expectReconciliationRuns(session, 1)
+		expect(session.requestReconciliation).toHaveBeenCalledWith()
 
 		await session.ownedResources[0].dispose()
 	})
@@ -755,249 +747,6 @@ describe("plugin resource watcher", () => {
 		expect(plugin.importFiles).not.toHaveBeenCalled()
 		expect(session.project.exportFiles).toBeUndefined()
 		await session.ownedResources[0].dispose()
-	})
-
-	it("refreshes fingerprints after an explicit resource write without reconciling its events", async () => {
-		vi.useFakeTimers()
-		const resourcePath = path.join(path.sep, "workspace", "translations", "en.json")
-		mocks.contents.set(resourcePath, new TextEncoder().encode("initial"))
-		const session = createWatcherSession([{ path: resourcePath, locale: "en" }])
-		await setupPluginResourceWatcher({ session })
-
-		await runWithPluginResourceWrite(session.project, async (recordResourceWrite) => {
-			const saved = new TextEncoder().encode("saved by Sherlock")
-			mocks.contents.set(resourcePath, saved)
-			recordResourceWrite({ type: "write", path: resourcePath, data: saved, options: undefined })
-			mocks.watchers[0]?.callbacks.change?.({ fsPath: resourcePath })
-		})
-		await vi.advanceTimersByTimeAsync(150)
-
-		expectReconciliationRuns(session, 0)
-		mocks.contents.set(resourcePath, new TextEncoder().encode("changed externally"))
-		mocks.watchers[0]?.callbacks.change?.({ fsPath: resourcePath })
-		await vi.advanceTimersByTimeAsync(150)
-		expectReconciliationRuns(session, 1)
-		await session.ownedResources[0].dispose()
-	})
-
-	it("does not bless an external edit made before owned write intent is recorded", async () => {
-		vi.useFakeTimers()
-		const resourcePath = path.join(path.sep, "workspace", "translations", "en.json")
-		mocks.contents.set(resourcePath, new TextEncoder().encode("initial"))
-		const session = createWatcherSession([{ path: resourcePath, locale: "en" }])
-		await setupPluginResourceWatcher({ session })
-
-		await runWithPluginResourceWrite(session.project, async (recordResourceWrite) => {
-			const saved = new TextEncoder().encode("saved by Sherlock")
-			const mappedFs = createFileSystemMapper(
-				path.sep,
-				{
-					writeFile: vi.fn(async (filePath: string) => {
-						mocks.contents.set(filePath, saved)
-						mocks.contents.set(filePath, new TextEncoder().encode("edited externally in the gap"))
-						mocks.watchers[0]?.callbacks.change?.({ fsPath: filePath })
-					}),
-				} as any,
-				recordResourceWrite
-			)
-			await mappedFs.writeFile(resourcePath, saved)
-		})
-		await vi.advanceTimersByTimeAsync(150)
-
-		expectReconciliationRuns(session, 1)
-		await session.ownedResources[0].dispose()
-	})
-
-	it("does not bless an external deletion made before owned write intent is recorded", async () => {
-		vi.useFakeTimers()
-		const resourcePath = path.join(path.sep, "workspace", "translations", "en.json")
-		mocks.contents.set(resourcePath, new TextEncoder().encode("initial"))
-		const session = createWatcherSession([{ path: resourcePath, locale: "en" }])
-		await setupPluginResourceWatcher({ session })
-
-		await runWithPluginResourceWrite(session.project, async (recordResourceWrite) => {
-			const saved = new TextEncoder().encode("saved by Sherlock")
-			const mappedFs = createFileSystemMapper(
-				path.sep,
-				{
-					writeFile: vi.fn(async (filePath: string) => {
-						mocks.contents.set(filePath, saved)
-						mocks.contents.delete(filePath)
-						mocks.watchers[0]?.callbacks.delete?.({ fsPath: filePath })
-					}),
-				} as any,
-				recordResourceWrite
-			)
-			await mappedFs.writeFile(resourcePath, saved)
-		})
-		await vi.advanceTimersByTimeAsync(150)
-
-		expectReconciliationRuns(session, 1)
-		await session.ownedResources[0].dispose()
-	})
-
-	it("reconciles an external change that overlaps a successful explicit resource write", async () => {
-		vi.useFakeTimers()
-		const resourcePath = path.join(path.sep, "workspace", "translations", "en.json")
-		mocks.contents.set(resourcePath, new TextEncoder().encode("initial"))
-		const session = createWatcherSession([{ path: resourcePath, locale: "en" }])
-		await setupPluginResourceWatcher({ session })
-
-		await runWithPluginResourceWrite(session.project, async (recordResourceWrite) => {
-			const saved = new TextEncoder().encode("saved by Sherlock")
-			mocks.contents.set(resourcePath, saved)
-			recordResourceWrite({ type: "write", path: resourcePath, data: saved, options: undefined })
-			mocks.contents.set(resourcePath, new TextEncoder().encode("changed externally"))
-			mocks.watchers[0]?.callbacks.change?.({ fsPath: resourcePath })
-		})
-		await vi.advanceTimersByTimeAsync(150)
-
-		expectReconciliationRuns(session, 1)
-		await session.ownedResources[0].dispose()
-	})
-
-	it("reconciles an external deletion that overlaps a successful explicit resource write", async () => {
-		vi.useFakeTimers()
-		const resourcePath = path.join(path.sep, "workspace", "translations", "en.json")
-		mocks.contents.set(resourcePath, new TextEncoder().encode("initial"))
-		const session = createWatcherSession([{ path: resourcePath, locale: "en" }])
-		await setupPluginResourceWatcher({ session })
-
-		await runWithPluginResourceWrite(session.project, async (recordResourceWrite) => {
-			const saved = new TextEncoder().encode("saved by Sherlock")
-			mocks.contents.set(resourcePath, saved)
-			recordResourceWrite({ type: "write", path: resourcePath, data: saved, options: undefined })
-			mocks.contents.delete(resourcePath)
-			mocks.watchers[0]?.callbacks.delete?.({ fsPath: resourcePath })
-		})
-		await vi.advanceTimersByTimeAsync(150)
-
-		expectReconciliationRuns(session, 1)
-		await session.ownedResources[0].dispose()
-	})
-
-	it("does not fingerprint every watched resource after an explicit write", async () => {
-		const resourcePaths = Array.from({ length: 20 }, (_, index) =>
-			path.join(path.sep, "workspace", "translations", `${index}.json`)
-		)
-		for (const resourcePath of resourcePaths) {
-			mocks.contents.set(resourcePath, new TextEncoder().encode("initial"))
-		}
-		const session = createWatcherSession(
-			resourcePaths.map((resourcePath, index) => ({ path: resourcePath, locale: String(index) }))
-		)
-		await setupPluginResourceWatcher({ session })
-		mocks.readFile.mockClear()
-
-		await runWithPluginResourceWrite(session.project, async () => undefined)
-
-		expect(mocks.readFile).not.toHaveBeenCalled()
-		await session.ownedResources[0].dispose()
-	})
-
-	it("does not suppress reconciliation when an explicit resource write fails", async () => {
-		vi.useFakeTimers()
-		const resourcePath = path.join(path.sep, "workspace", "translations", "en.json")
-		mocks.contents.set(resourcePath, new TextEncoder().encode("initial"))
-		const session = createWatcherSession([{ path: resourcePath, locale: "en" }])
-		await setupPluginResourceWatcher({ session })
-		const writeError = new Error("write failed")
-
-		await expect(
-			runWithPluginResourceWrite(session.project, async () => {
-				mocks.contents.set(resourcePath, new TextEncoder().encode("partially written"))
-				mocks.watchers[0]?.callbacks.change?.({ fsPath: resourcePath })
-				throw writeError
-			})
-		).rejects.toBe(writeError)
-		await vi.advanceTimersByTimeAsync(150)
-
-		expectReconciliationRuns(session, 1)
-		await session.ownedResources[0].dispose()
-	})
-
-	it("suppresses nested successful writes only after the outer write settles", async () => {
-		vi.useFakeTimers()
-		const firstPath = path.join(path.sep, "workspace", "translations", "en.json")
-		const secondPath = path.join(path.sep, "workspace", "translations", "de.json")
-		mocks.contents.set(firstPath, new TextEncoder().encode("initial en"))
-		mocks.contents.set(secondPath, new TextEncoder().encode("initial de"))
-		const session = createWatcherSession([
-			{ path: firstPath, locale: "en" },
-			{ path: secondPath, locale: "de" },
-		])
-		await setupPluginResourceWatcher({ session })
-
-		await runWithPluginResourceWrite(session.project, async (recordOuterWrite) => {
-			const firstSaved = new TextEncoder().encode("saved en")
-			mocks.contents.set(firstPath, firstSaved)
-			recordOuterWrite({ type: "write", path: firstPath, data: firstSaved, options: undefined })
-			mocks.watchers[0]?.callbacks.change?.({ fsPath: firstPath })
-
-			await runWithPluginResourceWrite(session.project, async (recordInnerWrite) => {
-				const secondSaved = new TextEncoder().encode("saved de")
-				mocks.contents.set(secondPath, secondSaved)
-				recordInnerWrite({
-					type: "write",
-					path: secondPath,
-					data: secondSaved,
-					options: undefined,
-				})
-				mocks.watchers[1]?.callbacks.change?.({ fsPath: secondPath })
-			})
-		})
-		await vi.advanceTimersByTimeAsync(150)
-
-		expectReconciliationRuns(session, 0)
-		await session.ownedResources[0].dispose()
-	})
-
-	it("suppresses a recursive owned deletion for every tracked descendant", async () => {
-		vi.useFakeTimers()
-		const directoryPath = path.join(path.sep, "workspace", "translations")
-		const firstPath = path.join(directoryPath, "en.json")
-		const secondPath = path.join(directoryPath, "de.json")
-		mocks.contents.set(firstPath, new TextEncoder().encode("initial en"))
-		mocks.contents.set(secondPath, new TextEncoder().encode("initial de"))
-		const session = createWatcherSession([
-			{ path: firstPath, locale: "en" },
-			{ path: secondPath, locale: "de" },
-		])
-		await setupPluginResourceWatcher({ session })
-
-		await runWithPluginResourceWrite(session.project, async (recordResourceWrite) => {
-			mocks.contents.delete(firstPath)
-			mocks.contents.delete(secondPath)
-			recordResourceWrite({ type: "delete", path: directoryPath, recursive: true })
-			mocks.watchers[0]?.callbacks.delete?.({ fsPath: firstPath })
-			mocks.watchers[1]?.callbacks.delete?.({ fsPath: secondPath })
-		})
-		await vi.advanceTimersByTimeAsync(150)
-
-		expectReconciliationRuns(session, 0)
-		await session.ownedResources[0].dispose()
-	})
-
-	it("releases event work when the watcher is disposed during an owned write", async () => {
-		const resourcePath = path.join(path.sep, "workspace", "translations", "en.json")
-		mocks.contents.set(resourcePath, new TextEncoder().encode("initial"))
-		const session = createWatcherSession([{ path: resourcePath, locale: "en" }])
-		await setupPluginResourceWatcher({ session })
-		const finishWrite = deferred<void>()
-
-		const write = runWithPluginResourceWrite(session.project, async (recordResourceWrite) => {
-			const saved = new TextEncoder().encode("saved")
-			mocks.contents.set(resourcePath, saved)
-			recordResourceWrite({ type: "write", path: resourcePath, data: saved, options: undefined })
-			mocks.watchers[0]?.callbacks.change?.({ fsPath: resourcePath })
-			await finishWrite.promise
-		})
-		await Promise.resolve()
-		const disposal = Promise.resolve(session.ownedResources[0].dispose())
-		finishWrite.resolve(undefined)
-
-		await expect(Promise.all([write, disposal])).resolves.toEqual([undefined, undefined])
-		expectReconciliationRuns(session, 0)
 	})
 
 	it("keeps one native watcher owner across ten installed revisions", async () => {

@@ -13,7 +13,6 @@ import { ExtractMessage } from "./actions/extractMessage.js"
 import { errorView } from "./utilities/errors/errors.js"
 import { messageView, type MessageViewController } from "./utilities/messages/messages.js"
 import { createFileSystemMapper, type FileSystem } from "./utilities/fs/createFileSystemMapper.js"
-import type { FileSystemMutation } from "./utilities/fs/createFileSystemMapper.js"
 import fs from "node:fs/promises"
 import * as nodeFs from "node:fs"
 import { gettingStartedView } from "./utilities/getting-started/gettingStarted.js"
@@ -34,7 +33,6 @@ import path from "node:path"
 import { linterDiagnostics } from "./diagnostics/linterDiagnostics.js"
 import {
 	createResourceLoadTracker,
-	runWithPluginResourceWrite,
 	setupPluginResourceWatcher,
 } from "./utilities/fs/pluginResourceWatcher.js"
 import { deactivateBeforeClose } from "./utilities/project/projectSession.js"
@@ -266,17 +264,15 @@ export async function saveProject(
 
 /** Persists a project that is still owned by a session during awaited teardown. */
 export async function saveProjectData(project: InlangProject, projectPath: string) {
-	await runWithPluginResourceWrite(project, async (recordResourceWrite) => {
-		const dottedKeySnapshots = await snapshotExplicitDottedMessageKeys(project, projectPath)
+	const dottedKeySnapshots = await snapshotExplicitDottedMessageKeys(project, projectPath)
 
-		await saveProjectToDirectory({
-			fs: createFileSystemMapper(projectPath, fs, recordResourceWrite),
-			project,
-			path: projectPath,
-		})
-
-		await restoreExplicitDottedMessageKeys(dottedKeySnapshots, recordResourceWrite)
+	await saveProjectToDirectory({
+		fs: createFileSystemMapper(projectPath, fs),
+		project,
+		path: projectPath,
 	})
+
+	await restoreExplicitDottedMessageKeys(dottedKeySnapshots)
 }
 
 async function snapshotExplicitDottedMessageKeys(
@@ -309,10 +305,7 @@ async function snapshotExplicitDottedMessageKeys(
 	return snapshots
 }
 
-async function restoreExplicitDottedMessageKeys(
-	snapshots: DottedMessageKeySnapshot[],
-	recordResourceWrite: (mutation: FileSystemMutation) => void
-) {
+async function restoreExplicitDottedMessageKeys(snapshots: DottedMessageKeySnapshot[]) {
 	for (const snapshot of snapshots) {
 		const originalContent = await fs
 			.readFile(snapshot.messageFilePath, "utf8")
@@ -346,12 +339,6 @@ async function restoreExplicitDottedMessageKeys(
 			trailingNewline: originalContent.endsWith("\n"),
 		})
 		await fs.writeFile(snapshot.messageFilePath, restoredContent)
-		recordResourceWrite({
-			type: "write",
-			path: snapshot.messageFilePath,
-			data: restoredContent,
-			options: undefined,
-		})
 	}
 }
 

@@ -143,7 +143,6 @@ vi.mock("./diagnostics/linterDiagnostics.js", () => ({
 
 vi.mock("./utilities/fs/pluginResourceWatcher.js", () => ({
 	createResourceLoadTracker: vi.fn((fs) => ({ fs, snapshot: new Map() })),
-	runWithPluginResourceWrite: vi.fn(async (_project, write) => write()),
 	setupPluginResourceWatcher: vi.fn(),
 }))
 

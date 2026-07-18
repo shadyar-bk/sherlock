@@ -39,20 +39,6 @@ describe("createFileSystemMapper", () => {
 		)
 	})
 
-	it("reports a successfully written normalized path", async () => {
-		const onDidMutate = vi.fn()
-		const fs = createFileSystemMapper(normalizedBase, mockFs, onDidMutate)
-
-		await fs.writeFile("relative.json", "test content")
-
-		expect(onDidMutate).toHaveBeenCalledWith({
-			type: "write",
-			path: _path.resolve(normalizedBase, "relative.json"),
-			data: "test content",
-			options: undefined,
-		})
-	})
-
 	it("uses the same resolution for absolute, relative, and normalized write paths", async () => {
 		const fs = createFileSystemMapper(normalizedBase, mockFs)
 
@@ -113,24 +99,6 @@ describe("createFileSystemMapper", () => {
 			testPath.startsWith(normalizedBase) ? testPath : _path.resolve(normalizedBase, testPath),
 			{ recursive: true }
 		)
-	})
-
-	it("reports exact and recursive deletion intent without guessing copy or symlink contents", async () => {
-		const onDidMutate = vi.fn()
-		const fs = createFileSystemMapper(normalizedBase, mockFs, onDidMutate)
-
-		await fs.rm("catalog", { recursive: true })
-		expect(onDidMutate).toHaveBeenCalledWith({
-			type: "delete",
-			path: _path.join(normalizedBase, "catalog"),
-			recursive: true,
-		})
-
-		onDidMutate.mockClear()
-		await fs.mkdir("catalog")
-		await fs.symlink("source.json", "catalog/link.json")
-		await fs.copyFile("source.json", "catalog/copy.json")
-		expect(onDidMutate).not.toHaveBeenCalled()
 	})
 
 	it("should map rmdir correctly", async () => {
