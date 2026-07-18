@@ -13,7 +13,10 @@ import { errorView } from "./utilities/errors/errors.js"
 import { recommendationBannerView } from "./utilities/recommendation/recommendation.js"
 import { getProjectRuntime } from "./utilities/project/projectRuntime.js"
 import { CONFIGURATION } from "./configuration.js"
-import { setupDirectMessageWatcher } from "./utilities/fs/experimental/directMessageHandler.js"
+import {
+	createResourceLoadTracker,
+	setupPluginResourceWatcher,
+} from "./utilities/fs/pluginResourceWatcher.js"
 
 vi.mock("vscode", () => ({
 	version: "1.90.0",
@@ -138,8 +141,10 @@ vi.mock("./diagnostics/linterDiagnostics.js", () => ({
 	linterDiagnostics: vi.fn(),
 }))
 
-vi.mock("./utilities/fs/experimental/directMessageHandler.js", () => ({
-	setupDirectMessageWatcher: vi.fn(),
+vi.mock("./utilities/fs/pluginResourceWatcher.js", () => ({
+	createResourceLoadTracker: vi.fn((fs) => ({ fs, snapshot: new Map() })),
+	runWithPluginResourceWrite: vi.fn(async (_project, write) => write()),
+	setupPluginResourceWatcher: vi.fn(),
 }))
 
 vi.mock("@inlang/sdk", () => ({
@@ -209,6 +214,15 @@ describe("discoverProjectsInWorkspace", () => {
 	})
 
 	it("registers global views once while replacing only the project session", async () => {
+		const firstWatcherDispose = vi.fn()
+		const secondWatcherDispose = vi.fn()
+		let watcherInstall = 0
+		vi.mocked(setupPluginResourceWatcher).mockImplementation(async ({ session }) => {
+			session.own({
+				dispose: watcherInstall++ === 0 ? firstWatcherDispose : secondWatcherDispose,
+			})
+			return []
+		})
 		const firstProject = {
 			plugins: { get: vi.fn(async () => []) },
 			settings: { get: vi.fn(async () => ({ locales: [] })) },
@@ -233,26 +247,38 @@ describe("discoverProjectsInWorkspace", () => {
 		await activate(context)
 		await getProjectRuntime().replaceProject("/workspace/project.inlang")
 
+		expect(createResourceLoadTracker).toHaveBeenCalledTimes(2)
 		expect(projectView).toHaveBeenCalledTimes(1)
 		expect(messageView).toHaveBeenCalledTimes(1)
 		expect(errorView).toHaveBeenCalledTimes(1)
 		expect(recommendationBannerView).toHaveBeenCalledTimes(1)
 		expect(firstProject.close).toHaveBeenCalledTimes(1)
-		expect(setupDirectMessageWatcher).toHaveBeenCalledTimes(2)
+		expect(setupPluginResourceWatcher).toHaveBeenCalledTimes(2)
+		expect(vi.mocked(setupPluginResourceWatcher).mock.calls[0]?.[0].loadSnapshot).toBe(
+			vi.mocked(createResourceLoadTracker).mock.results[0]?.value.snapshot
+		)
+		expect(vi.mocked(setupPluginResourceWatcher).mock.calls[1]?.[0].loadSnapshot).toBe(
+			vi.mocked(createResourceLoadTracker).mock.results[1]?.value.snapshot
+		)
+		expect(firstWatcherDispose).toHaveBeenCalledOnce()
 		const firstCodeActionProvider = vi.mocked(vscode.languages.registerCodeActionsProvider).mock
 			.results[0]?.value as vscode.Disposable
 		expect(firstCodeActionProvider.dispose).toHaveBeenCalledTimes(1)
 		expect(vi.mocked(firstCodeActionProvider.dispose).mock.invocationCallOrder[0]).toBeLessThan(
 			firstProject.close.mock.invocationCallOrder[0]!
 		)
+		expect(firstWatcherDispose.mock.invocationCallOrder[0]).toBeLessThan(
+			firstProject.close.mock.invocationCallOrder[0]!
+		)
 		expect(firstProject.close.mock.invocationCallOrder[0]).toBeLessThan(
-			vi.mocked(setupDirectMessageWatcher).mock.invocationCallOrder[1]!
+			vi.mocked(setupPluginResourceWatcher).mock.invocationCallOrder[1]!
 		)
 		expect(reloadedProject.close).not.toHaveBeenCalled()
 		expect(CONFIGURATION.EVENTS.ON_DID_PROJECT_CHANGE.fire).toHaveBeenCalledTimes(2)
 
 		await deactivate()
 		await deactivate()
+		expect(secondWatcherDispose).toHaveBeenCalledOnce()
 		expect(reloadedProject.close).toHaveBeenCalledTimes(1)
 	})
 

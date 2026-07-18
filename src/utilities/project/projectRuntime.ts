@@ -32,7 +32,10 @@ export function createProjectRuntime<Project extends CloseableProject>(args: {
 	): Promise<PreparedProjectSession>
 	publishActiveSession(session: ProjectSession<Project> | undefined): void
 	onDidReplaceSession?(session: ProjectSession<Project>): Promise<void> | void
-	onError?(error: unknown, phase: "cleanup" | "activation" | "notification"): void
+	onError?(
+		error: unknown,
+		phase: "cleanup" | "activation" | "notification" | "reconciliation"
+	): void
 }): ProjectRuntime<Project> {
 	let activeSession: ProjectSession<Project> | undefined
 	let lastRequestedProjectPath: string | undefined

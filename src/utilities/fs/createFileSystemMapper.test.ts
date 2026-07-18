@@ -39,6 +39,47 @@ describe("createFileSystemMapper", () => {
 		)
 	})
 
+	it("reports a successfully written normalized path", async () => {
+		const onDidMutate = vi.fn()
+		const fs = createFileSystemMapper(normalizedBase, mockFs, onDidMutate)
+
+		await fs.writeFile("relative.json", "test content")
+
+		expect(onDidMutate).toHaveBeenCalledWith({
+			type: "write",
+			path: _path.resolve(normalizedBase, "relative.json"),
+			data: "test content",
+			options: undefined,
+		})
+	})
+
+	it("uses the same resolution for absolute, relative, and normalized write paths", async () => {
+		const fs = createFileSystemMapper(normalizedBase, mockFs)
+
+		await fs.writeFile("relative.json", "relative")
+		await fs.writeFile("nested/../normalized.json", "normalized")
+		await fs.writeFile(`${normalizedBase}/absolute.json`, "absolute")
+
+		expect(mockFs.writeFile).toHaveBeenNthCalledWith(
+			1,
+			_path.join(normalizedBase, "relative.json"),
+			"relative",
+			undefined
+		)
+		expect(mockFs.writeFile).toHaveBeenNthCalledWith(
+			2,
+			_path.join(normalizedBase, "normalized.json"),
+			"normalized",
+			undefined
+		)
+		expect(mockFs.writeFile).toHaveBeenNthCalledWith(
+			3,
+			_path.join(normalizedBase, "absolute.json"),
+			"absolute",
+			undefined
+		)
+	})
+
 	it("should map readFile correctly", async () => {
 		const fs = createFileSystemMapper(normalizedBase, mockFs)
 		const testPath = "/test/path"
@@ -72,6 +113,24 @@ describe("createFileSystemMapper", () => {
 			testPath.startsWith(normalizedBase) ? testPath : _path.resolve(normalizedBase, testPath),
 			{ recursive: true }
 		)
+	})
+
+	it("reports exact and recursive deletion intent without guessing copy or symlink contents", async () => {
+		const onDidMutate = vi.fn()
+		const fs = createFileSystemMapper(normalizedBase, mockFs, onDidMutate)
+
+		await fs.rm("catalog", { recursive: true })
+		expect(onDidMutate).toHaveBeenCalledWith({
+			type: "delete",
+			path: _path.join(normalizedBase, "catalog"),
+			recursive: true,
+		})
+
+		onDidMutate.mockClear()
+		await fs.mkdir("catalog")
+		await fs.symlink("source.json", "catalog/link.json")
+		await fs.copyFile("source.json", "catalog/copy.json")
+		expect(onDidMutate).not.toHaveBeenCalled()
 	})
 
 	it("should map rmdir correctly", async () => {
@@ -164,5 +223,26 @@ describe("createFileSystemMapper", () => {
 		expect(mockFs.lstat).toHaveBeenCalledWith(
 			testPath.startsWith(normalizedBase) ? testPath : _path.resolve(normalizedBase, testPath)
 		)
+	})
+
+	it("uses Windows normalization and resolution semantics", async () => {
+		vi.resetModules()
+		vi.doMock("node:path", () => ({ ..._path.win32, default: _path.win32 }))
+		try {
+			const { createFileSystemMapper: createWindowsMapper } =
+				await import("./createFileSystemMapper.js")
+			const fs = createWindowsMapper(String.raw`C:\workspace`, mockFs)
+
+			await fs.writeFile(String.raw`catalog\nested\..\en.json`, "content")
+
+			expect(mockFs.writeFile).toHaveBeenCalledWith(
+				String.raw`C:\workspace\catalog\en.json`,
+				"content",
+				undefined
+			)
+		} finally {
+			vi.doUnmock("node:path")
+			vi.resetModules()
+		}
 	})
 })
