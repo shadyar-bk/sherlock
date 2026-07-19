@@ -753,8 +753,22 @@ describe("project resource synchronization", () => {
 		host.saveProjectToDirectory.mockImplementationOnce(async ({ fs }) => {
 			await fs.copyFile("../source.json", "../translations/en.json")
 			host.watchers[0]?.callbacks.change?.({ fsPath: resourcePaths[0]! })
+		})
+
+		await synchronization.save(project as any, projectPath)
+		await vi.advanceTimersByTimeAsync(150)
+		expect(session.requestReconciliation).not.toHaveBeenCalled()
+
+		host.saveProjectToDirectory.mockImplementationOnce(async ({ fs }) => {
 			await fs.rmdir("../translations/de.json")
 			host.watchers[1]?.callbacks.delete?.({ fsPath: resourcePaths[1]! })
+		})
+
+		await synchronization.save(project as any, projectPath)
+		await vi.advanceTimersByTimeAsync(150)
+		expect(session.requestReconciliation).not.toHaveBeenCalled()
+
+		host.saveProjectToDirectory.mockImplementationOnce(async ({ fs }) => {
 			await fs.rm("../translations", { recursive: true })
 			for (const [index, resourcePath] of resourcePaths.entries()) {
 				host.watchers[index]?.callbacks.delete?.({ fsPath: resourcePath })
@@ -763,7 +777,6 @@ describe("project resource synchronization", () => {
 
 		await synchronization.save(project as any, projectPath)
 		await vi.advanceTimersByTimeAsync(150)
-
 		expect(session.requestReconciliation).not.toHaveBeenCalled()
 		await session.ownedResources[0]?.dispose()
 	})
