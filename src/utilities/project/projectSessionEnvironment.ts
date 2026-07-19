@@ -18,7 +18,6 @@ import {
 	createProjectSessionLifecycle,
 	deactivateBeforeClose,
 	type Disposable,
-	type PreparedProjectSession,
 	type ProjectSession,
 } from "./projectSession.js"
 
@@ -104,7 +103,10 @@ function createEnvironmentRuntime<Project extends { close(): Promise<void> }>(ar
 	prepareSession(
 		session: ProjectSession<Project>,
 		resources: Disposable[]
-	): Promise<PreparedProjectSession>
+	): Promise<{
+		activate(): void
+		afterPreviousDisposed?(): Promise<void> | void
+	}>
 	publishActiveSession(session: ProjectSession<Project> | undefined): void
 	onDidReplaceSession?(session: ProjectSession<Project>): Promise<void> | void
 	onError?(

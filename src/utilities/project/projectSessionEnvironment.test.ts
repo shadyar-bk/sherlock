@@ -222,6 +222,34 @@ describe("project session environment", () => {
 		expect(first.close).not.toHaveBeenCalled()
 	})
 
+	it("rolls active publication back when publishing a candidate fails", async () => {
+		const first = fakeProject("first")
+		const candidate = fakeProject("candidate")
+		const publicationError = new Error("publication failed")
+		host.loadProjectFromDirectory.mockResolvedValueOnce(first).mockResolvedValueOnce(candidate)
+		const runtime = createProjectSessionEnvironment({ fileSystem })
+		await runtime.replaceProject("/first.inlang")
+		const previousLease = runtime.activeProject()
+		host.setActiveProject.mockImplementationOnce(() => {
+			throw publicationError
+		})
+
+		await expect(runtime.replaceProject("/candidate.inlang")).resolves.toEqual({
+			status: "failed",
+			error: publicationError,
+		})
+
+		expect(previousLease?.isCurrent()).toBe(true)
+		expect(runtime.activeProject()?.project).toBe(first)
+		expect(host.setActiveProject).toHaveBeenLastCalledWith({
+			project: first,
+			path: "/first.inlang",
+		})
+		expect(first.close).not.toHaveBeenCalled()
+		expect(candidate.close).toHaveBeenCalledTimes(1)
+		expect(host.projectChange).toHaveBeenCalledTimes(1)
+	})
+
 	it("lets a newer replacement supersede an older unresolved load", async () => {
 		const slow = deferred<InlangProject>()
 		const older = fakeProject("older")
@@ -405,35 +433,45 @@ describe("project session environment", () => {
 		await vi.waitFor(() => expect(host.handleError).toHaveBeenCalledWith(error))
 	})
 
-	it("pairs each watcher with the snapshot from its own overlapping project load", async () => {
+	it("reconciles the committed watcher from its own overlapping project snapshot", async () => {
 		vi.useFakeTimers()
 		const resourcePath = "/resources/messages.json"
 		const first = fakeProject("first", [], [resourcePath])
 		const superseded = fakeProject("superseded", [], [resourcePath])
 		const latest = fakeProject("latest", [], [resourcePath])
+		const reconciled = fakeProject("reconciled")
 		const slow = deferred<InlangProject>()
-		host.fileContents.set(resourcePath, bytes("first"))
+		const latestPreparation = deferred<Awaited<ReturnType<InlangProject["plugins"]["get"]>>>()
+		const latestPlugins = await latest.plugins.get()
+		;(latest.plugins.get as ReturnType<typeof vi.fn>)
+			.mockReturnValueOnce(latestPreparation.promise)
+			.mockResolvedValue(latestPlugins)
+		host.fileContents.set(resourcePath, bytes("current"))
 		host.createResourceLoadTracker
-			.mockReturnValueOnce(trackerWithSnapshot([[resourcePath, fingerprint("first")]]))
-			.mockReturnValueOnce(trackerWithSnapshot([[resourcePath, fingerprint("superseded")]]))
-			.mockReturnValueOnce(trackerWithSnapshot([[resourcePath, fingerprint("latest")]]))
+			.mockReturnValueOnce(trackerWithSnapshot([[resourcePath, fingerprint("current")]]))
+			.mockReturnValueOnce(trackerWithSnapshot([[resourcePath, fingerprint("current")]]))
+			.mockReturnValueOnce(trackerWithSnapshot([[resourcePath, fingerprint("during-latest-load")]]))
 		host.loadProjectFromDirectory
 			.mockResolvedValueOnce(first)
 			.mockReturnValueOnce(slow.promise)
 			.mockResolvedValueOnce(latest)
+			.mockResolvedValueOnce(reconciled)
 		const runtime = createProjectSessionEnvironment({ fileSystem })
 		await runtime.replaceProject("/first.inlang")
 
-		host.fileContents.set(resourcePath, bytes("latest"))
 		const olderReplacement = runtime.replaceProject("/superseded.inlang")
 		const latestReplacement = runtime.replaceProject("/latest.inlang")
+		for (let index = 0; index < 10; index += 1) await Promise.resolve()
 		slow.resolve(superseded)
-
+		for (let index = 0; index < 10; index += 1) await Promise.resolve()
+		latestPreparation.resolve(latestPlugins)
 		await expect(olderReplacement).resolves.toEqual({ status: "superseded" })
 		await expect(latestReplacement).resolves.toEqual({ status: "committed" })
 		await vi.advanceTimersByTimeAsync(200)
-		expect(host.loadProjectFromDirectory).toHaveBeenCalledTimes(3)
-		expect(runtime.activeProject()?.project).toBe(latest)
+		for (let index = 0; index < 10; index += 1) await Promise.resolve()
+
+		expect(host.loadProjectFromDirectory).toHaveBeenCalledTimes(4)
+		expect(runtime.activeProject()?.project).toBe(reconciled)
 	})
 
 	it("closes the previous project before the next watcher becomes authoritative", async () => {
@@ -573,18 +611,24 @@ describe("project session environment", () => {
 		expect(host.projectChange).toHaveBeenCalledTimes(2)
 	})
 
-	it("disposes the active watcher once across repeated bounded shutdown", async () => {
+	it("bounds repeated shutdown and disposes the active watcher once", async () => {
+		vi.useFakeTimers()
 		const resourcePath = "/resources/messages.json"
 		const project = fakeProject("active", [], [resourcePath])
 		host.fileContents.set(resourcePath, bytes("active"))
 		host.loadProjectFromDirectory.mockResolvedValue(project)
 		const runtime = createProjectSessionEnvironment({ fileSystem })
 		await runtime.replaceProject("/active.inlang")
+		void runtime.activeProject()?.runTask(() => new Promise<void>(() => undefined))
 
-		await Promise.all([runtime.dispose(), runtime.dispose()])
+		const firstDisposal = runtime.dispose()
+		const secondDisposal = runtime.dispose()
+		expect(firstDisposal).toBe(secondDisposal)
+		await vi.advanceTimersByTimeAsync(1_001)
+		await Promise.all([firstDisposal, secondDisposal])
 
 		expect(host.watchers).toHaveLength(1)
 		expect(host.watchers[0]?.dispose).toHaveBeenCalledTimes(1)
-		expect(project.close).toHaveBeenCalledTimes(1)
+		expect(project.close).not.toHaveBeenCalled()
 	})
 })
