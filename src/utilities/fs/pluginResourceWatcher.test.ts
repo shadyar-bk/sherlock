@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import {
 	createResourceLoadTracker,
 	discoverPluginResourceDescriptors,
+	runWithPluginResourceWrite,
 	setupPluginResourceWatcher,
 } from "./pluginResourceWatcher.js"
 
@@ -746,6 +747,131 @@ describe("plugin resource watcher", () => {
 		const plugin = (await session.project.plugins.get())[0]
 		expect(plugin.importFiles).not.toHaveBeenCalled()
 		expect(session.project.exportFiles).toBeUndefined()
+		await session.ownedResources[0].dispose()
+	})
+
+	it("acknowledges a successful Sherlock write without hiding the next external edit", async () => {
+		vi.useFakeTimers()
+		const resourcePath = path.join(path.sep, "workspace", "translations", "en.json")
+		mocks.contents.set(resourcePath, new TextEncoder().encode("initial"))
+		const session = createWatcherSession([{ path: resourcePath, locale: "en" }])
+		await setupPluginResourceWatcher({ session })
+
+		await runWithPluginResourceWrite(session.project, async (recordResourceWrite) => {
+			const saved = new TextEncoder().encode("saved by Sherlock")
+			mocks.contents.set(resourcePath, saved)
+			recordResourceWrite({
+				type: "write",
+				path: resourcePath,
+				data: saved,
+				options: undefined,
+			})
+			mocks.watchers[0]?.callbacks.change?.({ fsPath: resourcePath })
+		})
+		await vi.advanceTimersByTimeAsync(150)
+		expectReconciliationRuns(session, 0)
+
+		mocks.contents.set(resourcePath, new TextEncoder().encode("edited externally"))
+		mocks.watchers[0]?.callbacks.change?.({ fsPath: resourcePath })
+		await vi.advanceTimersByTimeAsync(150)
+
+		expectReconciliationRuns(session, 1)
+		await session.ownedResources[0].dispose()
+	})
+
+	it("reconciles an external edit that overlaps a successful Sherlock write", async () => {
+		vi.useFakeTimers()
+		const resourcePath = path.join(path.sep, "workspace", "translations", "en.json")
+		mocks.contents.set(resourcePath, new TextEncoder().encode("initial"))
+		const session = createWatcherSession([{ path: resourcePath, locale: "en" }])
+		await setupPluginResourceWatcher({ session })
+
+		await runWithPluginResourceWrite(session.project, async (recordResourceWrite) => {
+			const saved = new TextEncoder().encode("saved by Sherlock")
+			mocks.contents.set(resourcePath, saved)
+			recordResourceWrite({
+				type: "write",
+				path: resourcePath,
+				data: saved,
+				options: undefined,
+			})
+			mocks.contents.set(resourcePath, new TextEncoder().encode("edited externally"))
+			mocks.watchers[0]?.callbacks.change?.({ fsPath: resourcePath })
+		})
+		await vi.advanceTimersByTimeAsync(150)
+
+		expectReconciliationRuns(session, 1)
+		await session.ownedResources[0].dispose()
+	})
+
+	it("reconciles an external edit after Sherlock's refresh read but before release", async () => {
+		vi.useFakeTimers()
+		const resourcePath = path.join(path.sep, "workspace", "translations", "en.json")
+		mocks.contents.set(resourcePath, new TextEncoder().encode("initial"))
+		const session = createWatcherSession([{ path: resourcePath, locale: "en" }])
+		await setupPluginResourceWatcher({ session })
+		const refreshRead = deferred<Uint8Array>()
+		mocks.readFile.mockReturnValueOnce(refreshRead.promise)
+
+		const write = runWithPluginResourceWrite(session.project, async (recordResourceWrite) => {
+			const saved = new TextEncoder().encode("saved by Sherlock")
+			mocks.contents.set(resourcePath, saved)
+			recordResourceWrite({
+				type: "write",
+				path: resourcePath,
+				data: saved,
+				options: undefined,
+			})
+			mocks.watchers[0]?.callbacks.change?.({ fsPath: resourcePath })
+		})
+		await vi.waitFor(() => expect(mocks.readFile).toHaveBeenCalledTimes(2))
+		refreshRead.resolve(new TextEncoder().encode("saved by Sherlock"))
+		mocks.contents.set(resourcePath, new TextEncoder().encode("edited externally"))
+		await write
+		await vi.advanceTimersByTimeAsync(150)
+
+		expectReconciliationRuns(session, 1)
+		await session.ownedResources[0].dispose()
+	})
+
+	it("serializes concurrent Sherlock resource saves", async () => {
+		const project = {}
+		const firstWrite = deferred<void>()
+		const order: string[] = []
+		const first = runWithPluginResourceWrite(project, async () => {
+			order.push("first started")
+			await firstWrite.promise
+			order.push("first finished")
+		})
+		const second = runWithPluginResourceWrite(project, async () => {
+			order.push("second started")
+		})
+		await vi.waitFor(() => expect(order).toEqual(["first started"]))
+
+		firstWrite.resolve()
+		await Promise.all([first, second])
+
+		expect(order).toEqual(["first started", "first finished", "second started"])
+	})
+
+	it("does not suppress resource events when a Sherlock write fails", async () => {
+		vi.useFakeTimers()
+		const resourcePath = path.join(path.sep, "workspace", "translations", "en.json")
+		mocks.contents.set(resourcePath, new TextEncoder().encode("initial"))
+		const session = createWatcherSession([{ path: resourcePath, locale: "en" }])
+		await setupPluginResourceWatcher({ session })
+		const writeError = new Error("write failed")
+
+		await expect(
+			runWithPluginResourceWrite(session.project, async () => {
+				mocks.contents.set(resourcePath, new TextEncoder().encode("partially written"))
+				mocks.watchers[0]?.callbacks.change?.({ fsPath: resourcePath })
+				throw writeError
+			})
+		).rejects.toBe(writeError)
+		await vi.advanceTimersByTimeAsync(150)
+
+		expectReconciliationRuns(session, 1)
 		await session.ownedResources[0].dispose()
 	})
 

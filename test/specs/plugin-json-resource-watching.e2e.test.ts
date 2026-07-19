@@ -1,7 +1,7 @@
-import { expect } from "@wdio/globals"
+import { browser, expect } from "@wdio/globals"
 import fs from "node:fs/promises"
 import path from "node:path"
-import { readEditorBundle, waitForEditorBundle } from "../helpers/editorBundle.js"
+import { openEditorBundle, readEditorBundle, waitForEditorBundle } from "../helpers/editorBundle.js"
 import { e2ePluginFixtureUrl } from "../helpers/pluginFixtureServer.js"
 import { triggerProjectRefreshAndWait } from "../helpers/projectRefresh.js"
 import { snapshotWorkspacePaths } from "../helpers/workspaceFixture.js"
@@ -66,7 +66,9 @@ describe("Official JSON plugin resource watching", () => {
 			sourcePath,
 			operation: { type: "reload" },
 		})
-		expect((await readEditorBundle("greeting")).patterns).toEqual(["JSON initial", "JSON Deutsch"])
+		expect(
+			(await waitForEditorBundle("greeting", ["JSON initial", "JSON Deutsch"])).patterns
+		).toEqual(["JSON initial", "JSON Deutsch"])
 
 		await triggerProjectRefreshAndWait({
 			settingsPath,
@@ -77,7 +79,9 @@ describe("Official JSON plugin resource watching", () => {
 				value: { greeting: "JSON changed", stable: "Stable English" },
 			},
 		})
-		expect((await readEditorBundle("greeting")).patterns).toEqual(["JSON changed", "JSON Deutsch"])
+		expect(
+			(await waitForEditorBundle("greeting", ["JSON changed", "JSON Deutsch"])).patterns
+		).toEqual(["JSON changed", "JSON Deutsch"])
 		expect((await readEditorBundle("stable")).patterns).toEqual([
 			"Stable English",
 			"Stabil Deutsch",
@@ -101,10 +105,9 @@ describe("Official JSON plugin resource watching", () => {
 				value: { greeting: "JSON recreated", stable: "Stabil Deutsch" },
 			},
 		})
-		expect((await readEditorBundle("greeting")).patterns).toEqual([
-			"JSON changed",
-			"JSON recreated",
-		])
+		expect(
+			(await waitForEditorBundle("greeting", ["JSON changed", "JSON recreated"])).patterns
+		).toEqual(["JSON changed", "JSON recreated"])
 
 		await triggerProjectRefreshAndWait({
 			settingsPath,
@@ -122,9 +125,74 @@ describe("Official JSON plugin resource watching", () => {
 			},
 		})
 		expect(postReloadRefresh.diagnosticEvents).toBe(1)
-		expect((await readEditorBundle("greeting")).patterns).toEqual([
-			"JSON after reload",
-			"JSON recreated",
-		])
+		expect(
+			(await waitForEditorBundle("greeting", ["JSON after reload", "JSON recreated"])).patterns
+		).toEqual(["JSON after reload", "JSON recreated"])
+	})
+
+	it("does not let retiring editor state overwrite an external resource edit", async () => {
+		await triggerProjectRefreshAndWait({
+			settingsPath,
+			sourcePath,
+			operation: { type: "reload" },
+		})
+		const editor = await openEditorBundle("greeting")
+		expect((await editor.read()).patterns).toEqual(["JSON initial", "JSON Deutsch"])
+
+		try {
+			await browser.switchToFrame(null)
+			await browser.switchToFrame(null)
+			await triggerProjectRefreshAndWait({
+				settingsPath,
+				sourcePath,
+				operation: {
+					type: "write",
+					filePath: enResourcePath,
+					value: { greeting: "External edit", stable: "Stable English" },
+				},
+			})
+
+			const resource = JSON.parse(await fs.readFile(enResourcePath, "utf8"))
+			expect(resource.greeting).toBe("External edit")
+		} finally {
+			await editor.close()
+		}
+	})
+
+	it("keeps the editor open when Sherlock saves its own resource change", async () => {
+		await triggerProjectRefreshAndWait({
+			settingsPath,
+			sourcePath,
+			operation: { type: "reload" },
+		})
+		const editor = await openEditorBundle("greeting")
+
+		try {
+			await editor.editFirstPattern("Saved inside Sherlock")
+			let resource: Record<string, string> | undefined
+			await browser.waitUntil(
+				async () => {
+					try {
+						resource = JSON.parse(await fs.readFile(enResourcePath, "utf8"))
+						return (
+							(await editor.read()).patterns[0] === "Saved inside Sherlock" &&
+							resource?.greeting === "Saved inside Sherlock"
+						)
+					} catch {
+						return false
+					}
+				},
+				{
+					interval: 100,
+					timeout: 30_000,
+					timeoutMsg: "Sherlock did not finish saving the edited resource",
+				}
+			)
+
+			expect((await editor.read()).patterns[0]).toBe("Saved inside Sherlock")
+			expect(resource.greeting).toBe("Saved inside Sherlock")
+		} finally {
+			await editor.close()
+		}
 	})
 })

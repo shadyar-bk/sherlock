@@ -33,8 +33,10 @@ import path from "node:path"
 import { linterDiagnostics } from "./diagnostics/linterDiagnostics.js"
 import {
 	createResourceLoadTracker,
+	runWithPluginResourceWrite,
 	setupPluginResourceWatcher,
 } from "./utilities/fs/pluginResourceWatcher.js"
+import { trackFileSystemMutations } from "./utilities/fs/trackFileSystemMutations.js"
 import { deactivateBeforeClose } from "./utilities/project/projectSession.js"
 import {
 	createProjectRuntime,
@@ -262,25 +264,30 @@ export async function saveProject(
 		| ActiveProjectLease<InlangProject>
 		| undefined = getProjectRuntime<InlangProject>().activeProject()
 ) {
-	if (!lease) return
+	if (!lease) return "inactive" as const
 	try {
-		await lease.runTask(() => saveProjectData(lease.project, lease.path))
+		const result = await lease.runTask(() => saveProjectData(lease.project, lease.path))
+		return result.status === "completed" ? ("saved" as const) : ("inactive" as const)
 	} catch (error) {
 		handleError(error)
+		return "failed" as const
 	}
 }
 
 /** Persists a project that is still owned by a session during awaited teardown. */
 export async function saveProjectData(project: InlangProject, projectPath: string) {
-	const dottedKeySnapshots = await snapshotExplicitDottedMessageKeys(project, projectPath)
+	await runWithPluginResourceWrite(project, async (recordResourceWrite) => {
+		const dottedKeySnapshots = await snapshotExplicitDottedMessageKeys(project, projectPath)
+		const trackedFileSystem = trackFileSystemMutations(fs, recordResourceWrite)
 
-	await saveProjectToDirectory({
-		fs: createFileSystemMapper(projectPath, fs),
-		project,
-		path: projectPath,
+		await saveProjectToDirectory({
+			fs: createFileSystemMapper(projectPath, trackedFileSystem),
+			project,
+			path: projectPath,
+		})
+
+		await restoreExplicitDottedMessageKeys(dottedKeySnapshots, trackedFileSystem)
 	})
-
-	await restoreExplicitDottedMessageKeys(dottedKeySnapshots)
 }
 
 async function snapshotExplicitDottedMessageKeys(
@@ -313,9 +320,12 @@ async function snapshotExplicitDottedMessageKeys(
 	return snapshots
 }
 
-async function restoreExplicitDottedMessageKeys(snapshots: DottedMessageKeySnapshot[]) {
+async function restoreExplicitDottedMessageKeys(
+	snapshots: DottedMessageKeySnapshot[],
+	fileSystem: FileSystem
+) {
 	for (const snapshot of snapshots) {
-		const originalContent = await fs
+		const originalContent = await fileSystem
 			.readFile(snapshot.messageFilePath, "utf8")
 			.catch(() => undefined)
 		if (originalContent === undefined) continue
@@ -346,7 +356,7 @@ async function restoreExplicitDottedMessageKeys(snapshots: DottedMessageKeySnaps
 			indent: detectJsonIndent(originalContent),
 			trailingNewline: originalContent.endsWith("\n"),
 		})
-		await fs.writeFile(snapshot.messageFilePath, restoredContent)
+		await fileSystem.writeFile(snapshot.messageFilePath, restoredContent)
 	}
 }
 

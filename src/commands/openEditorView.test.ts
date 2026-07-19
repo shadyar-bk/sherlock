@@ -68,16 +68,26 @@ describe("Open Editor command", () => {
 	})
 
 	it("exports a focused editor when the extension shuts down", async () => {
+		const extensionUri = { fsPath: "/extension" } as vscode.Uri
 		const editor = {
 			createOrShowPanel: vi.fn(async () => undefined),
 			dispose: vi.fn(async () => undefined),
 		}
+		const lease = {
+			own: vi.fn(
+				(_resource: { dispose(reason?: "replacement" | "shutdown"): Promise<void> }) => true
+			),
+		}
 		vi.mocked(editorView).mockReturnValue(editor as never)
+		const callback = createOpenEditorViewCallback({
+			extensionUri,
+			activeProject: () => lease as never,
+		})
 
-		await openEditorViewCommand.callback({ bundleId: "welcome" })
+		await callback({ bundleId: "welcome" })
 
 		const ownedResource = lease.own.mock.calls[0]?.[0]
-		await ownedResource.dispose("shutdown")
+		await ownedResource?.dispose("shutdown")
 
 		expect(editor.dispose).toHaveBeenCalledWith({ persist: true })
 	})

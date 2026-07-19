@@ -1,11 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import * as vscode from "vscode"
 import fg from "fast-glob"
-import { activate, deactivate, discoverProjectsInWorkspace } from "./main.js"
+import {
+	activate,
+	deactivate,
+	discoverProjectsInWorkspace,
+	saveProject,
+	saveProjectData,
+} from "./main.js"
 import { state } from "./utilities/state.js"
 import { handleError } from "./utilities/utils.js"
 import { gettingStartedView } from "./utilities/getting-started/gettingStarted.js"
-import { loadProjectFromDirectory } from "@inlang/sdk"
+import { loadProjectFromDirectory, saveProjectToDirectory } from "@inlang/sdk"
 import { closestInlangProject } from "./utilities/project/closestInlangProject.js"
 import { projectView } from "./utilities/project/project.js"
 import { messageView } from "./utilities/messages/messages.js"
@@ -15,6 +21,7 @@ import { getProjectRuntime } from "./utilities/project/projectRuntime.js"
 import { CONFIGURATION } from "./configuration.js"
 import {
 	createResourceLoadTracker,
+	runWithPluginResourceWrite,
 	setupPluginResourceWatcher,
 } from "./utilities/fs/pluginResourceWatcher.js"
 
@@ -150,6 +157,7 @@ vi.mock("./diagnostics/linterDiagnostics.js", () => ({
 
 vi.mock("./utilities/fs/pluginResourceWatcher.js", () => ({
 	createResourceLoadTracker: vi.fn((fs) => ({ fs, snapshot: new Map() })),
+	runWithPluginResourceWrite: vi.fn(async (_project, write) => write(vi.fn())),
 	setupPluginResourceWatcher: vi.fn(),
 }))
 
@@ -327,5 +335,50 @@ describe("discoverProjectsInWorkspace", () => {
 			status: "committed",
 		})
 		expect(state().project).toBe(recoveredProject)
+	})
+
+	it("marks successful project exports as owned resource writes", async () => {
+		const project = {
+			settings: {
+				get: vi.fn(async () => ({ baseLocale: "en", locales: [] })),
+			},
+		}
+
+		await saveProjectData(project as any, "/workspace/project.inlang")
+
+		expect(runWithPluginResourceWrite).toHaveBeenCalledWith(project, expect.any(Function))
+		expect(saveProjectToDirectory).toHaveBeenCalledWith(
+			expect.objectContaining({
+				project,
+				path: "/workspace/project.inlang",
+			})
+		)
+	})
+
+	it("reports whether a leased project export was saved, inactive, or failed", async () => {
+		const project = {
+			settings: { get: vi.fn(async () => ({ baseLocale: "en", locales: [] })) },
+		}
+		const completedLease = {
+			path: "/workspace/project.inlang",
+			project,
+			runTask: async <T>(task: () => Promise<T>) => ({
+				status: "completed" as const,
+				value: await task(),
+			}),
+		}
+
+		await expect(saveProject(completedLease as any)).resolves.toBe("saved")
+		await expect(
+			saveProject({
+				...completedLease,
+				runTask: vi.fn(async () => ({ status: "inactive" as const })),
+			} as any)
+		).resolves.toBe("inactive")
+
+		const saveError = new Error("disk full")
+		vi.mocked(saveProjectToDirectory).mockRejectedValueOnce(saveError)
+		await expect(saveProject(completedLease as any)).resolves.toBe("failed")
+		expect(handleError).toHaveBeenCalledWith(saveError)
 	})
 })

@@ -52,7 +52,7 @@ describe("project session lifecycle", () => {
 		await vi.waitFor(() => expect(first.close).toHaveBeenCalledTimes(1))
 	})
 
-	it("does not retain watcher intent while a newer user selection is pending", async () => {
+	it("replays deferred watcher intent when a newer user selection fails", async () => {
 		const first = fakeProject("first")
 		const secondLoad = deferred<ReturnType<typeof fakeProject>>()
 		const refreshed = fakeProject("refreshed")
@@ -78,8 +78,6 @@ describe("project session lifecycle", () => {
 		secondLoad.reject(new Error("selection failed"))
 		expect(await selection).toMatchObject({ status: "failed" })
 
-		expect(loadProject).toHaveBeenCalledTimes(2)
-		expect(firstSession.requestReconciliation()).toEqual({ status: "scheduled" })
 		await vi.waitFor(() => expect(loadProject).toHaveBeenCalledTimes(3))
 		await vi.waitFor(() => expect(first.close).toHaveBeenCalledTimes(1))
 	})
@@ -178,7 +176,7 @@ describe("project session lifecycle", () => {
 		expect(selected.close).not.toHaveBeenCalled()
 	})
 
-	it("allows a later event after a superseded reconciliation and failed selection", async () => {
+	it("replays an in-flight reconciliation after a newer selection fails", async () => {
 		const first = fakeProject("first")
 		const staleRefresh = fakeProject("stale refresh")
 		const recoveredRefresh = fakeProject("recovered refresh")
@@ -208,8 +206,6 @@ describe("project session lifecycle", () => {
 		selectionLoad.reject(new Error("selection failed"))
 		expect(await selection).toMatchObject({ status: "failed" })
 
-		expect(loadProject).toHaveBeenCalledTimes(3)
-		expect(firstSession.requestReconciliation()).toEqual({ status: "scheduled" })
 		await vi.waitFor(() => expect(loadProject).toHaveBeenCalledTimes(4))
 		await vi.waitFor(() => expect(first.close).toHaveBeenCalledTimes(1))
 		expect(recoveredRefresh.close).not.toHaveBeenCalled()

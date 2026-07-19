@@ -71,11 +71,11 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 	): void
 	cleanupGraceMs?: number
 }) {
-	let activeSession:
-		| (ProjectSession<Project> & {
-				dispose(reason?: ProjectSessionDisposalReason): Promise<void>
-		  })
-		| undefined
+	type ManagedProjectSession = ProjectSession<Project> & {
+		dispose(reason?: ProjectSessionDisposalReason): Promise<void>
+		replayDeferredReconciliation(): void
+	}
+	let activeSession: ManagedProjectSession | undefined
 	let disposed = false
 	let disposal: Promise<void> | undefined
 	let generation = 0
@@ -102,26 +102,29 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 		let sessionDisposed = false
 		let active = false
 		let reconciliationInFlight = false
+		let reconciliationDeferred = false
 		const tasks = new Set<Promise<unknown>>()
 		let finalization: Promise<void> | undefined
 		let disposal: Promise<void> | undefined
-		let session: ProjectSession<Project> & {
+		let session: ManagedProjectSession & {
 			resources: Disposable[]
 			activate(): void
-			dispose(reason?: ProjectSessionDisposalReason): Promise<void>
 		}
 		const hasNewerUserReplacement = () =>
 			[...pendingUserReplacementGenerations].some(
 				(replacementGeneration) => replacementGeneration > sessionGeneration
 			)
 		const scheduleReconciliation = () => {
+			reconciliationDeferred = false
 			reconciliationInFlight = true
 			void trackReplacement(path, session)
 				.then((result) => {
 					if (result.status === "failed") reportError(result.error, "reconciliation")
+					if (result.status === "superseded") reconciliationDeferred = true
 				})
 				.finally(() => {
 					reconciliationInFlight = false
+					session.replayDeferredReconciliation()
 				})
 		}
 		session = {
@@ -150,15 +153,31 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 			},
 			requestReconciliation() {
 				if (!active || sessionDisposed || activeSession !== session) return SUPERSEDED
-				if (hasNewerUserReplacement()) return { status: "deferred" }
+				if (hasNewerUserReplacement()) {
+					reconciliationDeferred = true
+					return { status: "deferred" }
+				}
 				if (reconciliationInFlight) return { status: "scheduled" }
 				scheduleReconciliation()
 				return { status: "scheduled" }
+			},
+			replayDeferredReconciliation() {
+				if (
+					!reconciliationDeferred ||
+					!active ||
+					sessionDisposed ||
+					activeSession !== session ||
+					hasNewerUserReplacement()
+				) {
+					return
+				}
+				if (!reconciliationInFlight) scheduleReconciliation()
 			},
 			dispose(reason: ProjectSessionDisposalReason = "replacement") {
 				if (disposal) return disposal
 				sessionDisposed = true
 				active = false
+				reconciliationDeferred = false
 				const errors: unknown[] = []
 				const earlyDisposals = new Map<Disposable, Promise<PromiseSettledResult<void>>>()
 				for (let index = resources.length - 1; index >= 0; index -= 1) {
@@ -357,6 +376,7 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 			.finally(() => {
 				replacements.delete(replacement)
 				pendingUserReplacementGenerations.delete(replacementGeneration)
+				if (!reconciliationSource) activeSession?.replayDeferredReconciliation()
 			})
 			.catch(() => undefined)
 		return replacement

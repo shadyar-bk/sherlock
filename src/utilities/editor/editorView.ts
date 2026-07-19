@@ -45,7 +45,13 @@ export function editorView(args: {
 	let disposables: Disposable[] = []
 	let bundleId = initialBundleId
 	let pendingUpdate = Promise.resolve()
+	let editRevision = 0
+	let persistedRevision = 0
+	let pendingPersistence = Promise.resolve()
 	let disposed = false
+	const markDirty = () => {
+		editRevision += 1
+	}
 
 	/**
 	 * Opens a new panel if none is open, otherwise reveals the existing one.
@@ -127,19 +133,19 @@ export function editorView(args: {
 
 			switch (command) {
 				case "create-message":
-					await lease.runTask(() =>
+					await queueMutation(() =>
 						createMessage({ db: lease.project.db, message: message.message })
 					)
 
 					await updateView()
 					return
 				case "delete-variant":
-					await lease.runTask(() => deleteVariant({ db: lease.project.db, variantId: message.id }))
+					await queueMutation(() => deleteVariant({ db: lease.project.db, variantId: message.id }))
 
 					await updateView()
 					return
 				case "delete-bundle":
-					await lease.runTask(() =>
+					await queueMutation(() =>
 						deleteBundleNested({ db: lease.project.db, bundleId: message.id })
 					)
 
@@ -169,13 +175,32 @@ export function editorView(args: {
 		disposables.push(disposable)
 	}
 
-	function queueUpdate(message: UpdateBundleMessage) {
-		pendingUpdate = pendingUpdate.then(() =>
-			lease
-				.runTask(() => handleUpdateBundle({ db: lease.project.db, message }))
-				.then(() => undefined)
-		)
+	function queueMutation(mutation: () => Promise<unknown>) {
+		markDirty()
+		const previousUpdate = pendingUpdate
+		const execution = lease.runTask(async () => {
+			await previousUpdate
+			await mutation()
+		})
+		pendingUpdate = execution.then(() => undefined)
 		return pendingUpdate
+	}
+
+	function queueUpdate(message: UpdateBundleMessage) {
+		return queueMutation(() => handleUpdateBundle({ db: lease.project.db, message }))
+	}
+
+	function persistCurrentRevision() {
+		const revision = editRevision
+		const matchingUpdate = pendingUpdate
+		const persistence = pendingPersistence.then(async () => {
+			await matchingUpdate
+			if (revision <= persistedRevision) return
+			const result = await saveProject(lease)
+			if (result === "saved") persistedRevision = Math.max(persistedRevision, revision)
+		})
+		pendingPersistence = persistence.catch(() => undefined)
+		return persistence
 	}
 
 	/**
@@ -201,7 +226,7 @@ export function editorView(args: {
 		const workspaceFolder = vscode.workspace.workspaceFolders![0]
 		if (workspaceFolder) {
 			try {
-				await saveProject(lease)
+				await persistCurrentRevision()
 			} catch (error) {
 				console.error("Failed to save project", error)
 				msg(`Failed to save project. ${String(error)}`, "error")
@@ -211,14 +236,14 @@ export function editorView(args: {
 
 	async function persistEdit() {
 		await pendingUpdate
-		if (!lease.isCurrent()) return
+		if (!lease.isCurrent() || editRevision <= persistedRevision) return
 
 		CONFIGURATION.EVENTS.ON_DID_EDIT_MESSAGE.fire()
 
 		const workspaceFolder = vscode.workspace.workspaceFolders![0]
 		if (workspaceFolder) {
 			try {
-				await saveProject(lease)
+				await persistCurrentRevision()
 			} catch (error) {
 				console.error("Failed to save project", error)
 				msg(`Failed to save project. ${String(error)}`, "error")
@@ -306,7 +331,12 @@ export function editorView(args: {
 		if (disposed) return
 		disposed = true
 		await pendingUpdate
-		if (options.persist) await saveProjectData(lease.project, lease.path)
+		await pendingPersistence
+		if (options.persist && editRevision > persistedRevision) {
+			const revision = editRevision
+			await saveProjectData(lease.project, lease.path)
+			persistedRevision = Math.max(persistedRevision, revision)
+		}
 		const currentPanel = panel
 		panel = undefined
 		currentPanel?.dispose()
