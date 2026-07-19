@@ -7,12 +7,13 @@ type State = {
 	/**
 	 * Inlang project
 	 */
-	project: InlangProject
+	project?: InlangProject
 	selectedProjectPath: string
 	projectsInWorkspace: Array<{ projectPath: string }>
 }
 
 let _state: State
+const proxiedProjects = new WeakSet<InlangProject>()
 
 /**
  * Set the state.
@@ -38,6 +39,20 @@ export function setProjectsInWorkspace(projectsInWorkspace: State["projectsInWor
 	}
 
 	if (_state.project) proxyPluginGetMethod(_state.project)
+}
+
+export function setActiveProject(active: { project: InlangProject; path: string } | undefined) {
+	_state = {
+		..._state,
+		project: active?.project,
+		selectedProjectPath: active?.path ?? "",
+	}
+
+	if (active) proxyPluginGetMethod(active.project)
+}
+
+export function prepareProject(project: InlangProject) {
+	proxyPluginGetMethod(project)
 }
 
 /**
@@ -71,6 +86,8 @@ export function safeState(): State | undefined {
  * Proxy the project.plugins.get method to apply migration automatically
  */
 function proxyPluginGetMethod(project: InlangProject) {
+	if (proxiedProjects.has(project)) return
+	proxiedProjects.add(project)
 	const originalGet = project.plugins.get
 
 	// Replace the get function with our proxy
@@ -81,7 +98,7 @@ function proxyPluginGetMethod(project: InlangProject) {
 		const mutablePlugins = [...plugins]
 
 		// Apply the migration logic to plugins
-		await migrateAddCustomApi(mutablePlugins)
+		await migrateAddCustomApi(mutablePlugins, project)
 
 		return mutablePlugins // Return the migrated plugins
 	}
@@ -90,9 +107,7 @@ function proxyPluginGetMethod(project: InlangProject) {
 /**
  * Migrate the addCustomApi method to meta for a list of plugins.
  */
-async function migrateAddCustomApi(plugins: InlangPlugin[]): Promise<void> {
-	const project = state().project
-
+async function migrateAddCustomApi(plugins: InlangPlugin[], project: InlangProject): Promise<void> {
 	// Migrate each plugin
 	for (const plugin of plugins) {
 		// If the plugin has an addCustomApi function and meta is not set

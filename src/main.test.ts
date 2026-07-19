@@ -1,10 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import * as vscode from "vscode"
 import fg from "fast-glob"
-import { activate, discoverProjectsInWorkspace } from "./main.js"
+import { activate, deactivate, discoverProjectsInWorkspace } from "./main.js"
 import { state } from "./utilities/state.js"
 import { handleError } from "./utilities/utils.js"
 import { gettingStartedView } from "./utilities/getting-started/gettingStarted.js"
+import { loadProjectFromDirectory } from "@inlang/sdk"
+import { closestInlangProject } from "./utilities/project/closestInlangProject.js"
+import { projectView } from "./utilities/project/project.js"
+import { messageView } from "./utilities/messages/messages.js"
+import { errorView } from "./utilities/errors/errors.js"
+import { recommendationBannerView } from "./utilities/recommendation/recommendation.js"
+import { getProjectRuntime } from "./utilities/project/projectRuntime.js"
+import { CONFIGURATION } from "./configuration.js"
+import { setupDirectMessageWatcher } from "./utilities/fs/experimental/directMessageHandler.js"
 
 vi.mock("vscode", () => ({
 	version: "1.90.0",
@@ -21,7 +30,7 @@ vi.mock("vscode", () => ({
 		showErrorMessage: vi.fn(),
 	},
 	languages: {
-		registerCodeActionsProvider: vi.fn(),
+		registerCodeActionsProvider: vi.fn(() => ({ dispose: vi.fn() })),
 	},
 	EventEmitter: class {
 		fire = vi.fn()
@@ -48,9 +57,26 @@ vi.mock("fast-glob", () => ({
 
 vi.mock("./configuration.js", () => ({
 	CONFIGURATION: {
-		COMMANDS: {},
+		COMMANDS: {
+			RELOAD: {
+				command: "sherlock.reloadProject",
+				callback: vi.fn(),
+				register: vi.fn(() => ({ dispose: vi.fn() })),
+			},
+		},
 		FILES: {
 			PROJECT: "project.inlang/settings.json",
+		},
+		EVENTS: {
+			ON_DID_EDIT_MESSAGE: { fire: vi.fn() },
+			ON_DID_CREATE_MESSAGE: { fire: vi.fn() },
+			ON_DID_EXTRACT_MESSAGE: { fire: vi.fn() },
+			ON_DID_PROJECT_CHANGE: {
+				fire: vi.fn(),
+				event: vi.fn(() => ({ dispose: vi.fn() })),
+			},
+			ON_DID_PROJECT_TREE_VIEW_CHANGE: { fire: vi.fn() },
+			ON_DID_ERROR_TREE_VIEW_CHANGE: { fire: vi.fn() },
 		},
 	},
 }))
@@ -118,6 +144,7 @@ vi.mock("./utilities/fs/experimental/directMessageHandler.js", () => ({
 
 vi.mock("@inlang/sdk", () => ({
 	saveProjectToDirectory: vi.fn(),
+	loadProjectFromDirectory: vi.fn(),
 }))
 
 describe("discoverProjectsInWorkspace", () => {
@@ -127,7 +154,8 @@ describe("discoverProjectsInWorkspace", () => {
 		},
 	} as vscode.WorkspaceFolder
 
-	beforeEach(() => {
+	beforeEach(async () => {
+		await deactivate()
 		vi.clearAllMocks()
 		;(
 			vscode.workspace as unknown as { workspaceFolders: vscode.WorkspaceFolder[] }
@@ -173,10 +201,87 @@ describe("discoverProjectsInWorkspace", () => {
 		} as unknown as vscode.ExtensionContext
 		vi.mocked(fg.async).mockRejectedValueOnce(error)
 
-		await expect(activate(context)).resolves.toEqual({ context })
+		await expect(activate(context)).resolves.toBeUndefined()
 
 		expect(handleError).toHaveBeenCalledWith(error)
 		expect(state().projectsInWorkspace).toEqual([])
 		expect(gettingStartedView).toHaveBeenCalledWith(expect.objectContaining({ workspaceFolder }))
+	})
+
+	it("registers global views once while replacing only the project session", async () => {
+		const firstProject = {
+			plugins: { get: vi.fn(async () => []) },
+			settings: { get: vi.fn(async () => ({ locales: [] })) },
+			errors: { get: vi.fn(async () => []) },
+			close: vi.fn(async () => undefined),
+		}
+		const reloadedProject = {
+			plugins: { get: vi.fn(async () => []) },
+			settings: { get: vi.fn(async () => ({ locales: [] })) },
+			errors: { get: vi.fn(async () => []) },
+			close: vi.fn(async () => undefined),
+		}
+		const context = { subscriptions: [] } as unknown as vscode.ExtensionContext
+		vi.mocked(fg.async).mockResolvedValueOnce(["/workspace/project.inlang"])
+		vi.mocked(closestInlangProject).mockResolvedValueOnce({
+			projectPath: "/workspace/project.inlang",
+		} as any)
+		vi.mocked(loadProjectFromDirectory)
+			.mockResolvedValueOnce(firstProject as any)
+			.mockResolvedValueOnce(reloadedProject as any)
+
+		await activate(context)
+		await getProjectRuntime().replaceProject("/workspace/project.inlang")
+
+		expect(projectView).toHaveBeenCalledTimes(1)
+		expect(messageView).toHaveBeenCalledTimes(1)
+		expect(errorView).toHaveBeenCalledTimes(1)
+		expect(recommendationBannerView).toHaveBeenCalledTimes(1)
+		expect(firstProject.close).toHaveBeenCalledTimes(1)
+		expect(setupDirectMessageWatcher).toHaveBeenCalledTimes(2)
+		const firstCodeActionProvider = vi.mocked(vscode.languages.registerCodeActionsProvider).mock
+			.results[0]?.value as vscode.Disposable
+		expect(firstCodeActionProvider.dispose).toHaveBeenCalledTimes(1)
+		expect(vi.mocked(firstCodeActionProvider.dispose).mock.invocationCallOrder[0]).toBeLessThan(
+			firstProject.close.mock.invocationCallOrder[0]!
+		)
+		expect(firstProject.close.mock.invocationCallOrder[0]).toBeLessThan(
+			vi.mocked(setupDirectMessageWatcher).mock.invocationCallOrder[1]!
+		)
+		expect(reloadedProject.close).not.toHaveBeenCalled()
+		expect(CONFIGURATION.EVENTS.ON_DID_PROJECT_CHANGE.fire).toHaveBeenCalledTimes(2)
+
+		await deactivate()
+		await deactivate()
+		expect(reloadedProject.close).toHaveBeenCalledTimes(1)
+	})
+
+	it("keeps global views and the runtime available after the initial project load fails", async () => {
+		const loadError = new Error("plugin failed to load")
+		const recoveredProject = {
+			plugins: { get: vi.fn(async () => []) },
+			settings: { get: vi.fn(async () => ({ locales: [] })) },
+			errors: { get: vi.fn(async () => []) },
+			close: vi.fn(async () => undefined),
+		}
+		const context = { subscriptions: [] } as unknown as vscode.ExtensionContext
+		vi.mocked(fg.async).mockResolvedValueOnce(["/workspace/project.inlang"])
+		vi.mocked(closestInlangProject).mockResolvedValueOnce({
+			projectPath: "/workspace/project.inlang",
+		} as any)
+		vi.mocked(loadProjectFromDirectory)
+			.mockRejectedValueOnce(loadError)
+			.mockResolvedValueOnce(recoveredProject as any)
+
+		await activate(context)
+
+		expect(handleError).toHaveBeenCalledWith(loadError)
+		expect(projectView).toHaveBeenCalledTimes(1)
+		expect(errorView).toHaveBeenCalledTimes(1)
+		expect(getProjectRuntime().lastRequestedProjectPath()).toBe("/workspace/project.inlang")
+		await expect(getProjectRuntime().replaceProject("/workspace/project.inlang")).resolves.toEqual({
+			status: "committed",
+		})
+		expect(state().project).toBe(recoveredProject)
 	})
 })

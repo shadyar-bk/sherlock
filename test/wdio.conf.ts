@@ -206,8 +206,11 @@ export const config: Options.Testrunner = {
 	 * @param  {object} specs    specs to be run in the worker process
 	 * @param  {number} retries  number of retries used
 	 */
-	// onWorkerEnd: function (cid, exitCode, specs, retries) {
-	// },
+	onWorkerEnd: function () {
+		if (providedWorkspacePath) return
+		fs.rmSync(e2eWorkspacePath, { recursive: true, force: true })
+		fs.cpSync(fixtureWorkspacePath, e2eWorkspacePath, { recursive: true })
+	},
 	/**
 	 * Gets executed just before initialising the webdriver session and test framework. It allows you
 	 * to manipulate configurations depending on the capability or spec.

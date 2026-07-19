@@ -39,6 +39,23 @@ vi.mock("../state.js", () => ({
 	state: vi.fn(),
 }))
 
+vi.mock("../project/projectRuntime.js", () => ({
+	getProjectRuntime: () => ({
+		activeProject: () => {
+			const project = state().project
+			return project
+				? {
+						project,
+						runTask: async <T>(task: () => Promise<T>) => ({
+							status: "completed" as const,
+							value: await task(),
+						}),
+					}
+				: undefined
+		},
+	}),
+}))
+
 describe("error handling", () => {
 	beforeEach(() => {
 		// Clear all mocks and reset state to avoid leaks between tests

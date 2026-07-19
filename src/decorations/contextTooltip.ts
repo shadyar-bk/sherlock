@@ -5,7 +5,8 @@ import { getStringFromPattern } from "../utilities/messages/query.js"
 import { INTERPOLATE } from "../configuration.js"
 import { escapeHtml } from "../utilities/utils.js"
 import { type IdeExtensionConfig } from "@inlang/sdk"
-import { getSelectedBundleByBundleIdOrAlias } from "../utilities/helper.js"
+import type { InlangProject } from "@inlang/sdk"
+import { selectBundleById } from "../utilities/project/selectBundleById.js"
 
 const MISSING_TRANSLATION_MESSAGE = "[missing]"
 
@@ -36,25 +37,22 @@ function renderTranslationRow(row: ContextTableRow) {
 export async function contextTooltip(
 	referenceMessage: Awaited<
 		ReturnType<IdeExtensionConfig["messageReferenceMatchers"][number]>
-	>[number]
+	>[number],
+	project: InlangProject | undefined = state().project
 ) {
-	const context = vscode.extensions.getExtension("inlang.vs-code-extension")?.exports.context
-	if (!context) {
-		console.error("Extension context is not available.")
-		return
-	}
+	if (!project) return
 
 	// @ts-ignore TODO: Introduce deprecation message for messageId
 	referenceMessage.bundleId = referenceMessage.bundleId || referenceMessage.messageId
 	// resolve message from id or alias
-	const bundle = await getSelectedBundleByBundleIdOrAlias(referenceMessage.bundleId)
+	const bundle = await selectBundleById(project, referenceMessage.bundleId)
 
 	if (!bundle) {
 		return undefined // Return early if message is not found
 	}
 
 	// Get the configured language tags
-	const configuredLanguageTags = (await state().project.settings.get())?.locales || []
+	const configuredLanguageTags = (await project.settings.get())?.locales || []
 
 	// Generate rows for each configured language tag
 	const contextTableRows: ContextTableRow[] = await Promise.all(

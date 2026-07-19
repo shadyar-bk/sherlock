@@ -1,9 +1,6 @@
 import * as vscode from "vscode"
 import { handleError } from "../utilities/utils.js"
-import { state } from "../utilities/state.js"
-import { main } from "../main.js"
-import { createFileSystemMapper } from "../utilities/fs/createFileSystemMapper.js"
-import fs from "node:fs/promises"
+import { getProjectRuntime } from "../utilities/project/projectRuntime.js"
 
 export const reloadProjectCommand = {
 	command: "sherlock.reloadProject",
@@ -17,34 +14,24 @@ export const reloadProjectCommand = {
 			const workspaceFolder = vscode.workspace.workspaceFolders?.[0]
 			if (!workspaceFolder) {
 				console.warn("No workspace folder found.")
-				return
+				return "no-workspace" as const
 			}
 
-			// Create file system mapper
-			const mappedFs = createFileSystemMapper(workspaceFolder.uri.fsPath, fs)
-
-			// Get context from extension
-			const extension = vscode.extensions.getExtension("inlang.vs-code-extension")
-			if (!extension) {
-				throw new Error("Could not find Sherlock extension")
-			}
-
-			// Get API from extension (returns context)
-			const api = await extension.activate()
-			if (!api?.context) {
-				throw new Error("Could not get extension context")
-			}
-
-			// Update project if we have a selected project
-			if (state().selectedProjectPath) {
-				await main({ context: api.context, workspaceFolder, fs: mappedFs })
-				console.log("Project reloaded successfully")
+			const runtime = getProjectRuntime()
+			const projectPath = runtime.activeProject()?.path ?? runtime.lastRequestedProjectPath()
+			if (projectPath) {
+				const result = await runtime.replaceProject(projectPath)
+				if (result.status === "failed") throw result.error
+				if (result.status === "committed") console.log("Project reloaded successfully")
+				return result.status
 			} else {
 				console.warn("No project selected, nothing to reload")
+				return "no-project" as const
 			}
 		} catch (error) {
 			console.error("Failed to reload project:", error)
 			handleError(error)
+			return "failed" as const
 		}
 	},
 }

@@ -1,6 +1,7 @@
 import * as vscode from "vscode"
-import { state } from "../state.js"
 import { CONFIGURATION } from "../../configuration.js"
+import type { InlangProject } from "@inlang/sdk"
+import { getProjectRuntime } from "../project/projectRuntime.js"
 
 export interface ErrorNode {
 	label: string
@@ -32,11 +33,15 @@ export function createErrorNode(error: Error | 0 | undefined): ErrorNode {
 }
 
 export async function createErrorNodes(): Promise<ErrorNode[]> {
-	const errors = ((await state().project.errors.get()) as Error[]) || []
-	if (state().project === undefined) {
+	const lease = getProjectRuntime<InlangProject>().activeProject()
+	if (!lease) {
 		// no project
 		return [createErrorNode(undefined)]
-	} else if (errors.length === 0) {
+	}
+	const result = await lease.runTask(() => lease.project.errors.get())
+	if (result.status !== "completed") return [createErrorNode(undefined)]
+	const errors = [...result.value]
+	if (errors.length === 0) {
 		// no errors
 		return [createErrorNode(0)]
 	}

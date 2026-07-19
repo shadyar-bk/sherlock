@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
 import * as vscode from "vscode"
 import * as fs from "node:fs/promises"
-import { setState, state } from "../state.js"
+import { state } from "../state.js"
 import { CONFIGURATION } from "../../configuration.js"
 import { capture } from "../../services/telemetry/index.js"
 import {
@@ -12,7 +12,7 @@ import {
 	type ProjectViewNode,
 	projectView,
 } from "./project.js"
-import { loadProjectFromDirectory } from "@inlang/sdk"
+import { getProjectRuntime } from "./projectRuntime.js"
 import type { FileSystem } from "../fs/createFileSystemMapper.js"
 
 vi.mock("vscode", () => ({
@@ -36,12 +36,27 @@ vi.mock("vscode", () => ({
 	EventEmitter: vi.fn(),
 }))
 
-vi.mock("@inlang/sdk", () => ({
-	loadProjectFromDirectory: vi.fn(),
+const replaceProject = vi.hoisted(() => vi.fn())
+
+vi.mock("./projectRuntime.js", () => ({
+	getProjectRuntime: vi.fn(() => ({
+		replaceProject,
+		activeProject: () => {
+			const project = state().project
+			return project
+				? {
+						project,
+						runTask: async <T>(task: () => Promise<T>) => ({
+							status: "completed" as const,
+							value: await task(),
+						}),
+					}
+				: undefined
+		},
+	})),
 }))
 
 vi.mock("../state.js", () => ({
-	setState: vi.fn(),
 	state: vi.fn(() => ({
 		projectsInWorkspace: [
 			{
@@ -194,7 +209,11 @@ describe("getTreeItem", () => {
 describe("handleTreeSelection", () => {
 	const mockContext = {} as vscode.ExtensionContext
 
-	it.skip("should handle tree selection and update state", async () => {
+	beforeEach(() => {
+		replaceProject.mockReset().mockResolvedValue({ status: "committed" })
+	})
+
+	it("should replace the session when the user selects a project", async () => {
 		const selectedNode: ProjectViewNode = {
 			label: "SelectedProject",
 			path: "/path/to/selected",
@@ -217,13 +236,15 @@ describe("handleTreeSelection", () => {
 			},
 		}
 
-		// Mock the resolved value of loadProjectFromDirectory to return the mockProject
-		// @ts-expect-error
-		vi.mocked(loadProjectFromDirectory).mockResolvedValue(mockProject)
+		vi.mocked(state).mockReturnValue({
+			projectsInWorkspace: [],
+			selectedProjectPath: selectedNode.path,
+			project: mockProject,
+		} as any)
 
 		await handleTreeSelection({ selectedNode, fs, workspaceFolder })
 
-		expect(setState).toBeCalled()
+		expect(getProjectRuntime().replaceProject).toHaveBeenCalledWith(selectedNode.path)
 		expect(capture).toBeCalledWith(
 			expect.objectContaining({
 				event: "IDE-EXTENSION loaded project",
@@ -232,7 +253,6 @@ describe("handleTreeSelection", () => {
 				}),
 			})
 		)
-		expect(CONFIGURATION.EVENTS.ON_DID_PROJECT_TREE_VIEW_CHANGE.fire).toBeCalled()
 	})
 
 	it("should show error message if project loading fails", async () => {
@@ -250,8 +270,7 @@ describe("handleTreeSelection", () => {
 			},
 		} as vscode.WorkspaceFolder
 
-		// @ts-expect-error
-		loadProjectFromDirectory.mockRejectedValue(new Error("Loading failed"))
+		replaceProject.mockRejectedValueOnce(new Error("Loading failed"))
 
 		await handleTreeSelection({ selectedNode, fs, workspaceFolder })
 
@@ -272,7 +291,7 @@ describe("handleTreeSelection", () => {
 
 		const error = new Error("Loading failed")
 
-		vi.mocked(loadProjectFromDirectory).mockRejectedValue(error)
+		replaceProject.mockRejectedValueOnce(error)
 
 		const mockWorkspaceFolder = {
 			uri: { fsPath: "/path/to/workspace" },

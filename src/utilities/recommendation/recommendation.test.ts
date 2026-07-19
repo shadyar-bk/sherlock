@@ -66,7 +66,7 @@ describe("recommendationBannerView", () => {
 				name: "test-workspace",
 				index: 0,
 			},
-			context: {} as vscode.ExtensionContext,
+			context: { subscriptions: [] } as unknown as vscode.ExtensionContext,
 		}
 
 		await recommendationBannerView(args)

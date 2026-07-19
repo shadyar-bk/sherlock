@@ -1,12 +1,12 @@
 import * as vscode from "vscode"
-import { loadProjectFromDirectory } from "@inlang/sdk"
 import { CONFIGURATION } from "../../configuration.js"
 import { capture } from "../../services/telemetry/index.js"
-import { setState, state } from "../state.js"
+import { state } from "../state.js"
 import * as Sherlock from "@inlang/recommend-sherlock"
-import * as fs from "node:fs"
 import type { FileSystem } from "../fs/createFileSystemMapper.js"
 import path from "node:path"
+import { getProjectRuntime } from "./projectRuntime.js"
+import type { InlangProject } from "@inlang/sdk"
 
 let projectViewNodes: ProjectViewNode[] = []
 
@@ -99,43 +99,28 @@ export async function handleTreeSelection(args: {
 }): Promise<void> {
 	const selectedProject = path.normalize(args.selectedNode.path)
 
-	projectViewNodes = projectViewNodes.map((node) => ({
-		...node,
-		isSelected: node.path === args.selectedNode.path,
-	}))
-
-	const newSelectedProject = projectViewNodes.find((node) => node.isSelected)?.path as string
-	console.log(newSelectedProject)
-
 	try {
-		const inlangProject = await loadProjectFromDirectory({
-			path: newSelectedProject,
-			fs,
-		})
-
-		setState({
-			...state(),
-			project: inlangProject,
-			selectedProjectPath: newSelectedProject,
-		})
-
-		// Update decorations
-		CONFIGURATION.EVENTS.ON_DID_EDIT_MESSAGE.fire(undefined)
-		CONFIGURATION.EVENTS.ON_DID_CREATE_MESSAGE.fire(undefined)
-		CONFIGURATION.EVENTS.ON_DID_EXTRACT_MESSAGE.fire(undefined)
-		// Refresh the entire tree to reflect selection changes
-		CONFIGURATION.EVENTS.ON_DID_PROJECT_TREE_VIEW_CHANGE.fire(undefined)
-		CONFIGURATION.EVENTS.ON_DID_ERROR_TREE_VIEW_CHANGE.fire(undefined)
+		const result = await getProjectRuntime<InlangProject>().replaceProject(selectedProject)
+		if (result.status === "failed") throw result.error
+		if (result.status !== "committed") return
+		projectViewNodes = projectViewNodes.map((node) => ({
+			...node,
+			isSelected: node.path === args.selectedNode.path,
+		}))
 
 		const isInWorkspaceRecommendation = await Sherlock.shouldRecommend({
 			fs: args.fs,
 			workingDirectory: path.normalize(args.workspaceFolder.uri.fsPath),
 		})
 
+		const activeProject = getProjectRuntime<InlangProject>().activeProject()
+		const projectErrors = activeProject
+			? await activeProject.runTask(() => activeProject.project.errors.get())
+			: undefined
 		capture({
 			event: "IDE-EXTENSION loaded project",
 			properties: {
-				errors: await inlangProject.errors.get(),
+				errors: projectErrors?.status === "completed" ? projectErrors.value : [],
 				isInWorkspaceRecommendation,
 			},
 		})
@@ -181,17 +166,4 @@ export const projectView = async (args: {
 	args.context.subscriptions.push(
 		vscode.window.registerTreeDataProvider("projectView", treeDataProvider)
 	)
-
-	// Trigger handleTreeSelection for the selected project after initializing the tree view
-	const selectedProjectPath = state().selectedProjectPath
-	if (selectedProjectPath) {
-		const selectedNode = projectViewNodes.find((node) => node.path === selectedProjectPath)
-		if (selectedNode) {
-			await handleTreeSelection({
-				selectedNode,
-				fs: args.fs,
-				workspaceFolder: args.workspaceFolder,
-			})
-		}
-	}
 }

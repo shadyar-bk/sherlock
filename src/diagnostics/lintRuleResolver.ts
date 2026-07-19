@@ -8,10 +8,11 @@ import {
 } from "../utilities/lint-rules/lintRules.js"
 import { state } from "../utilities/state.js"
 import * as vscode from "vscode"
+import type { InlangProject } from "@inlang/sdk"
 
 export interface LintRule {
 	name: string // The name of the lint rule (e.g., "missingMessage", "bundleWithoutMessageWithBaseLocale")
-	ruleFn: (bundleId: string) => Promise<LintResult[]> // The linting function that runs on a bundle and returns lint results
+	ruleFn: (bundleId: string, project?: InlangProject) => Promise<LintResult[]> // The linting function that runs on a bundle and returns lint results
 }
 
 // Map of available custom lint rules with updated names
@@ -38,8 +39,9 @@ const customLintRules: Record<string, LintRule> = {
 	},
 }
 
-export async function resolveLintRules() {
-	const settings = await state().project.settings.get()
+export async function resolveLintRules(project: InlangProject | undefined = state().project) {
+	if (!project) return []
+	const settings = await project.settings.get()
 	const lintRuleLevels = settings.messageLintRuleLevels || {}
 	const activeRules: LintRule[] = []
 
@@ -54,7 +56,7 @@ export async function resolveLintRules() {
 
 		if (customRule) {
 			const severity = lintRuleLevels[`messageLintRule.inlang.${moduleName}`] || "error" // Default to error if not specified
-			const wrappedRuleFn = wrapLintRuleWithSeverity(customRule.ruleFn, severity)
+			const wrappedRuleFn = wrapLintRuleWithSeverity(customRule.ruleFn, severity, project)
 
 			// Ensure that 'name' is present and not undefined
 			activeRules.push({
@@ -69,11 +71,12 @@ export async function resolveLintRules() {
 }
 
 export function wrapLintRuleWithSeverity(
-	ruleFn: (bundleId: string) => Promise<LintResult[]>,
-	severity: string
+	ruleFn: (bundleId: string, project?: InlangProject) => Promise<LintResult[]>,
+	severity: string,
+	project?: InlangProject
 ) {
 	return async (bundleId: string) => {
-		const results = await ruleFn(bundleId)
+		const results = project ? await ruleFn(bundleId, project) : await ruleFn(bundleId)
 		return results.map((result) => ({
 			...result,
 			severity: mapSeverity(severity),

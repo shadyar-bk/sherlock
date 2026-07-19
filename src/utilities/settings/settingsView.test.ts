@@ -2,12 +2,20 @@ import { describe, it, expect, vi } from "vitest"
 import { settingsPanel, getWebviewContent } from "./settingsView.js"
 import * as vscode from "vscode"
 
+const project = vi.hoisted(() => ({
+	settings: { get: async () => ({}) },
+	plugins: { get: async () => [] },
+}))
+const own = vi.hoisted(() => vi.fn(() => true))
+
 vi.mock("vscode", () => ({
 	window: {
 		createWebviewPanel: vi.fn().mockReturnValue({
+			dispose: vi.fn(),
+			onDidDispose: vi.fn(),
 			webview: {
 				html: "",
-				onDidReceiveMessage: vi.fn(),
+				onDidReceiveMessage: vi.fn(() => ({ dispose: vi.fn() })),
 				asWebviewUri: vi.fn().mockImplementation((uri: vscode.Uri) => uri),
 			},
 		}),
@@ -42,6 +50,21 @@ vi.mock("../state.js", () => ({
 	}),
 }))
 
+vi.mock("../project/projectRuntime.js", () => ({
+	getProjectRuntime: () => ({
+		activeProject: () => ({
+			path: "Users/username/happy-elephant.inlang",
+			project,
+			isCurrent: () => true,
+			own,
+			runTask: async <T>(task: () => Promise<T>) => ({
+				status: "completed" as const,
+				value: await task(),
+			}),
+		}),
+	}),
+}))
+
 describe("settingsPanel", () => {
 	it("should create a webview panel with the correct properties", async () => {
 		const mockContext = {
@@ -57,6 +80,7 @@ describe("settingsPanel", () => {
 				localResourceRoots: [expect.anything()],
 			})
 		)
+		expect(own).toHaveBeenCalledWith(expect.objectContaining({ dispose: expect.any(Function) }))
 	})
 })
 

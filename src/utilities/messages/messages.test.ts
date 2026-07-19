@@ -5,9 +5,18 @@ import {
 	createMessageHtml,
 	createNoMessagesFoundHtml,
 	createMessagesLoadingHtml,
+	createMessageWebviewProvider,
 	getHtml,
 	getTranslationsTableHtml,
 } from "./messages.js"
+import { CONFIGURATION } from "../../configuration.js"
+
+const pollSubscribe = vi.hoisted(() => vi.fn())
+
+const completedTask = async <T>(task: () => Promise<T>) => ({
+	status: "completed" as const,
+	value: await task(),
+})
 
 // Mocking vscode module and state module
 vi.mock("vscode", () => ({
@@ -31,7 +40,16 @@ vi.mock("vscode", () => ({
 		asWebviewUri: vi.fn(),
 		cspSource: "cspSource",
 	})),
-	EventEmitter: vi.fn(),
+	EventEmitter: class {
+		listeners = new Set<(value: unknown) => void>()
+		event = (listener: (value: unknown) => void) => {
+			this.listeners.add(listener)
+			return { dispose: () => this.listeners.delete(listener) }
+		}
+		fire = (value: unknown) => {
+			for (const listener of this.listeners) listener(value)
+		}
+	},
 	CodeActionKind: {
 		QuickFix: vi.fn(),
 	},
@@ -48,6 +66,10 @@ vi.mock("vscode", () => ({
 
 vi.mock("../state.js", () => ({
 	state: vi.fn(),
+}))
+
+vi.mock("../polling/pollQuery.js", () => ({
+	pollQuery: vi.fn(() => ({ subscribe: pollSubscribe })),
 }))
 
 describe("Message Webview Provider Tests", () => {
@@ -239,6 +261,191 @@ describe("Message Webview Provider Tests", () => {
 		expect(html).toContain("Loading messages...")
 	})
 
+	it("replaces polling when reload creates a new project at the same path", async () => {
+		const firstSubscription = { unsubscribe: vi.fn(async () => undefined) }
+		const secondSubscription = { unsubscribe: vi.fn(async () => undefined) }
+		pollSubscribe.mockReturnValueOnce(firstSubscription).mockReturnValueOnce(secondSubscription)
+		const firstProject = { db: {}, plugins: { get: vi.fn(async () => []) } }
+		const secondProject = { db: {}, plugins: { get: vi.fn(async () => []) } }
+		const provider = createMessageWebviewProvider({
+			workspaceFolder: { uri: { fsPath: "/workspace" } } as vscode.WorkspaceFolder,
+			context: {
+				subscriptions: [],
+				extensionUri: { fsPath: "/extension" },
+			} as unknown as vscode.ExtensionContext,
+		})
+		const firstBinding = provider.bindProject({
+			path: "/workspace/project.inlang",
+			project: firstProject,
+			runTask: completedTask,
+		} as any)
+		provider.resolveWebviewView(
+			{
+				onDidDispose: vi.fn(),
+				webview: {
+					onDidReceiveMessage: vi.fn(),
+					asWebviewUri: vi.fn((uri) => uri),
+					cspSource: "test-csp",
+					options: {},
+					html: "",
+				},
+			} as unknown as vscode.WebviewView,
+			{} as never,
+			{} as never
+		)
+		await vi.waitFor(() => expect(pollSubscribe).toHaveBeenCalledTimes(1))
+
+		provider.bindProject({
+			path: "/workspace/project.inlang",
+			project: secondProject,
+			runTask: completedTask,
+		} as any)
+		await Promise.resolve()
+		expect(pollSubscribe).toHaveBeenCalledTimes(1)
+		CONFIGURATION.EVENTS.ON_DID_PROJECT_CHANGE.fire(undefined)
+		await firstBinding.dispose()
+
+		await vi.waitFor(() => expect(pollSubscribe).toHaveBeenCalledTimes(2))
+		expect(firstSubscription.unsubscribe).toHaveBeenCalledTimes(1)
+		expect(secondSubscription.unsubscribe).not.toHaveBeenCalled()
+	})
+
+	it("registers global listeners once and suspends polling while the view is disposed", async () => {
+		const firstSubscription = { unsubscribe: vi.fn(async () => undefined) }
+		const secondSubscription = { unsubscribe: vi.fn(async () => undefined) }
+		pollSubscribe.mockReturnValueOnce(firstSubscription).mockReturnValueOnce(secondSubscription)
+		const provider = createMessageWebviewProvider({
+			workspaceFolder: { uri: { fsPath: "/workspace" } } as vscode.WorkspaceFolder,
+			context: {
+				subscriptions: [],
+				extensionUri: { fsPath: "/extension" },
+			} as unknown as vscode.ExtensionContext,
+		})
+		provider.bindProject({
+			path: "/workspace/project.inlang",
+			project: { db: {}, plugins: { get: vi.fn(async () => []) } },
+			runTask: completedTask,
+		} as any)
+		let disposeFirstView!: () => void
+		const createView = (captureDispose?: (callback: () => void) => void) =>
+			({
+				onDidDispose: vi.fn((callback) => captureDispose?.(callback)),
+				webview: {
+					onDidReceiveMessage: vi.fn(),
+					asWebviewUri: vi.fn((uri) => uri),
+					cspSource: "test-csp",
+					options: {},
+					html: "",
+				},
+			}) as unknown as vscode.WebviewView
+
+		provider.resolveWebviewView(
+			createView((callback) => (disposeFirstView = callback)),
+			{} as never,
+			{} as never
+		)
+		await vi.waitFor(() => expect(pollSubscribe).toHaveBeenCalledTimes(1))
+		disposeFirstView()
+		await vi.waitFor(() => expect(firstSubscription.unsubscribe).toHaveBeenCalledTimes(1))
+
+		provider.resolveWebviewView(createView(), {} as never, {} as never)
+		await vi.waitFor(() => expect(pollSubscribe).toHaveBeenCalledTimes(2))
+		expect(vscode.window.onDidChangeActiveTextEditor).toHaveBeenCalledTimes(1)
+		expect(vscode.workspace.onDidChangeTextDocument).toHaveBeenCalledTimes(1)
+		expect(vscode.workspace.onDidChangeConfiguration).toHaveBeenCalledTimes(1)
+	})
+
+	it("does not let late disposal of an old view tear down its replacement", async () => {
+		const subscription = { unsubscribe: vi.fn(async () => undefined) }
+		pollSubscribe.mockReturnValueOnce(subscription)
+		const provider = createMessageWebviewProvider({
+			workspaceFolder: { uri: { fsPath: "/workspace" } } as vscode.WorkspaceFolder,
+			context: {
+				subscriptions: [],
+				extensionUri: { fsPath: "/extension" },
+			} as unknown as vscode.ExtensionContext,
+		})
+		provider.bindProject({
+			path: "/workspace/project.inlang",
+			project: { db: {}, plugins: { get: vi.fn(async () => []) } },
+			runTask: completedTask,
+		} as any)
+		let disposeFirstView!: () => void
+		let disposeSecondView!: () => void
+		const createView = (captureDispose: (callback: () => void) => void) =>
+			({
+				onDidDispose: vi.fn(captureDispose),
+				webview: {
+					onDidReceiveMessage: vi.fn(),
+					asWebviewUri: vi.fn((uri) => uri),
+					cspSource: "test-csp",
+					options: {},
+					html: "",
+				},
+			}) as unknown as vscode.WebviewView
+
+		provider.resolveWebviewView(
+			createView((callback) => (disposeFirstView = callback)),
+			{} as never,
+			{} as never
+		)
+		await vi.waitFor(() => expect(pollSubscribe).toHaveBeenCalledTimes(1))
+		provider.resolveWebviewView(
+			createView((callback) => (disposeSecondView = callback)),
+			{} as never,
+			{} as never
+		)
+
+		disposeFirstView()
+		await Promise.resolve()
+		expect(subscription.unsubscribe).not.toHaveBeenCalled()
+
+		disposeSecondView()
+		await vi.waitFor(() => expect(subscription.unsubscribe).toHaveBeenCalledTimes(1))
+	})
+
+	it("stops polling when VS Code cancels webview resolution", async () => {
+		const subscription = { unsubscribe: vi.fn(async () => undefined) }
+		pollSubscribe.mockReturnValueOnce(subscription)
+		const provider = createMessageWebviewProvider({
+			workspaceFolder: { uri: { fsPath: "/workspace" } } as vscode.WorkspaceFolder,
+			context: {
+				subscriptions: [],
+				extensionUri: { fsPath: "/extension" },
+			} as unknown as vscode.ExtensionContext,
+		})
+		provider.bindProject({
+			path: "/workspace/project.inlang",
+			project: { db: {}, plugins: { get: vi.fn(async () => []) } },
+			runTask: completedTask,
+		} as any)
+		let cancel!: () => void
+		provider.resolveWebviewView(
+			{
+				onDidDispose: vi.fn(),
+				webview: {
+					onDidReceiveMessage: vi.fn(() => ({ dispose: vi.fn() })),
+					asWebviewUri: vi.fn((uri) => uri),
+					cspSource: "test-csp",
+					options: {},
+					html: "",
+				},
+			} as unknown as vscode.WebviewView,
+			{} as never,
+			{
+				onCancellationRequested: vi.fn((callback) => {
+					cancel = callback
+					return { dispose: vi.fn() }
+				}),
+			} as unknown as vscode.CancellationToken
+		)
+		await vi.waitFor(() => expect(pollSubscribe).toHaveBeenCalledTimes(1))
+
+		cancel()
+
+		await vi.waitFor(() => expect(subscription.unsubscribe).toHaveBeenCalledTimes(1))
+	})
+
 	it("should create the complete webview HTML", () => {
 		// Mocking the context and webview
 		const context = {
@@ -252,6 +459,7 @@ describe("Message Webview Provider Tests", () => {
 		const html = getHtml({
 			mainContent: "<div>Main Content</div>",
 			webview,
+			extensionUri: context.extensionUri,
 		})
 
 		// Validating that the webview HTML contains the expected content

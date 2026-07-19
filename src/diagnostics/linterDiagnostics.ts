@@ -2,91 +2,106 @@
 import * as vscode from "vscode"
 import { resolveLintRules } from "./lintRuleResolver.js"
 import type { FileSystem } from "../utilities/fs/createFileSystemMapper.js"
-import { getExtensionApi, getSelectedBundleByBundleIdOrAlias } from "../utilities/helper.js"
+import { getExtensionApi } from "../utilities/helper.js"
+import type { InlangProject } from "@inlang/sdk"
+import {
+	deactivateBeforeClose,
+	type Disposable,
+	type ProjectSession,
+} from "../utilities/project/projectSession.js"
+import { selectBundleById } from "../utilities/project/selectBundleById.js"
+import { handleError } from "../utilities/utils.js"
+import { CONFIGURATION } from "../configuration.js"
 
 export async function linterDiagnostics(args: {
-	context: vscode.ExtensionContext
+	subscriptions: Disposable[]
 	fs: FileSystem
+	session: ProjectSession<InlangProject>
 }) {
 	const linterDiagnosticCollection = vscode.languages.createDiagnosticCollection("inlang-lint")
+	args.subscriptions.push(linterDiagnosticCollection)
+	const eventSubscriptions: vscode.Disposable[] = []
 
-	async function updateLintDiagnostics() {
-		const activeTextEditor = vscode.window.activeTextEditor
-		if (!activeTextEditor) return
+	function updateLintDiagnostics() {
+		void (async () => {
+			const result = await args.session.runTask(async () => {
+				const project = args.session.project
+				const activeTextEditor = vscode.window.activeTextEditor
+				if (!activeTextEditor) return
 
-		const documentText = activeTextEditor.document.getText()
-		const extensionApi = await getExtensionApi()
+				const documentText = activeTextEditor.document.getText()
+				const extensionApi = await getExtensionApi(project)
 
-		if (!extensionApi) return
+				if (!extensionApi) return
 
-		// Process messageReferenceMatchers to match bundles
-		const messageReferenceMatchers = extensionApi.messageReferenceMatchers ?? []
-		const activeLintRules = await resolveLintRules()
-		const diagnostics: vscode.Diagnostic[] = []
+				// Process messageReferenceMatchers to match bundles
+				const messageReferenceMatchers = extensionApi.messageReferenceMatchers ?? []
+				const activeLintRules = await resolveLintRules(project)
+				const diagnostics: vscode.Diagnostic[] = []
 
-		// Run each matcher on the document text
-		const wrappedLints = messageReferenceMatchers.map(async (matcher) => {
-			const bundles = await matcher({ documentText })
+				// Run each matcher on the document text
+				const wrappedLints = messageReferenceMatchers.map(async (matcher) => {
+					const bundles = await matcher({ documentText })
 
-			const diagnosticsIndex: Record<string, Record<string, vscode.Diagnostic[]>> = {}
+					const diagnosticsIndex: Record<string, Record<string, vscode.Diagnostic[]>> = {}
 
-			for (const bundle of bundles) {
-				// @ts-ignore TODO: Introduce deprecation message for messageId
-				bundle.bundleId = bundle.bundleId || bundle.messageId
-				// Retrieve the bundle and messages
-				const _bundle = await getSelectedBundleByBundleIdOrAlias(bundle.bundleId)
-
-				if (_bundle) {
-					for (const lintRule of activeLintRules) {
+					for (const bundle of bundles) {
 						// @ts-ignore TODO: Introduce deprecation message for messageId
-						const lintResults = await lintRule.ruleFn(bundle.bundleId)
+						bundle.bundleId = bundle.bundleId || bundle.messageId
+						// Retrieve the bundle and messages
+						const _bundle = await selectBundleById(project, bundle.bundleId)
 
-						for (const result of lintResults) {
-							const diagnosticRange = new vscode.Range(
-								new vscode.Position(0, 0), // Adjust based on actual range from matcher
-								new vscode.Position(0, 1)
-							)
+						if (_bundle) {
+							for (const lintRule of activeLintRules) {
+								// @ts-ignore TODO: Introduce deprecation message for messageId
+								const lintResults = await lintRule.ruleFn(bundle.bundleId, project)
 
-							const diagnostic = new vscode.Diagnostic(
-								diagnosticRange,
-								`[${result.code}] - ${result.description}`,
-								result.severity
-							)
+								for (const result of lintResults) {
+									const diagnosticRange = new vscode.Range(
+										new vscode.Position(0, 0), // Adjust based on actual range from matcher
+										new vscode.Position(0, 1)
+									)
 
-							// Create index for diagnostics if missing
-							if (!diagnosticsIndex[bundle.bundleId]) {
-								diagnosticsIndex[bundle.bundleId] = {}
+									const diagnostic = new vscode.Diagnostic(
+										diagnosticRange,
+										`[${result.code}] - ${result.description}`,
+										result.severity
+									)
+
+									// Create index for diagnostics if missing
+									if (!diagnosticsIndex[bundle.bundleId]) {
+										diagnosticsIndex[bundle.bundleId] = {}
+									}
+
+									// Store the diagnostics
+									const rangeIndex = getRangeIndex(diagnostic.range)
+									if (!diagnosticsIndex[bundle.bundleId]![rangeIndex]) {
+										diagnosticsIndex[bundle.bundleId]![rangeIndex] = []
+									}
+									// Typescript doesn't understand that diagnosticsIndex[bundle.bundleId]![rangeIndex] is an empty array if it doesn't exist
+									// @ts-expect-error
+									diagnosticsIndex[bundle.bundleId]![rangeIndex].push(diagnostic)
+								}
 							}
-
-							// Store the diagnostics
-							const rangeIndex = getRangeIndex(diagnostic.range)
-							if (!diagnosticsIndex[bundle.bundleId]![rangeIndex]) {
-								diagnosticsIndex[bundle.bundleId]![rangeIndex] = []
-							}
-							// Typescript doesn't understand that diagnosticsIndex[bundle.bundleId]![rangeIndex] is an empty array if it doesn't exist
-							// @ts-expect-error
-							diagnosticsIndex[bundle.bundleId]![rangeIndex].push(diagnostic)
 						}
 					}
-				}
+
+					// Collect all diagnostics
+					diagnostics.push(...flattenDiagnostics(diagnosticsIndex))
+				})
+
+				await Promise.all(wrappedLints || [])
+
+				return { uri: activeTextEditor.document.uri, diagnostics }
+			})
+			if (result.status === "completed" && result.value) {
+				linterDiagnosticCollection.set(result.value.uri, result.value.diagnostics)
 			}
-
-			// Collect all diagnostics
-			diagnostics.push(...flattenDiagnostics(diagnosticsIndex))
-		})
-
-		await Promise.all(wrappedLints || [])
-
-		// Set all the collected diagnostics at once
-		linterDiagnosticCollection.set(activeTextEditor.document.uri, diagnostics)
+		})().catch(handleError)
 	}
 
 	// Trigger diagnostics on active text editor change and text document change
-	vscode.window.onDidChangeActiveTextEditor(
-		updateLintDiagnostics,
-		undefined,
-		args.context.subscriptions
-	)
+	vscode.window.onDidChangeActiveTextEditor(updateLintDiagnostics, undefined, eventSubscriptions)
 	vscode.workspace.onDidChangeTextDocument(
 		(event) => {
 			if (event.document === vscode.window.activeTextEditor?.document) {
@@ -94,11 +109,12 @@ export async function linterDiagnostics(args: {
 			}
 		},
 		undefined,
-		args.context.subscriptions
+		eventSubscriptions
 	)
-
-	// Run diagnostics on initial load
-	updateLintDiagnostics()
+	eventSubscriptions.push(
+		CONFIGURATION.EVENTS.ON_DID_PROJECT_CHANGE.event(() => updateLintDiagnostics())
+	)
+	args.subscriptions.push(...eventSubscriptions.map(deactivateBeforeClose))
 }
 
 // Helper function to get a unique index for a range

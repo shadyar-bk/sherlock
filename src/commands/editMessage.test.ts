@@ -5,7 +5,12 @@ import { state } from "../utilities/state.js"
 import { msg } from "../utilities/messages/msg.js"
 import { CONFIGURATION } from "../configuration.js"
 import { getPatternFromString, getStringFromPattern } from "../utilities/messages/query.js"
-import { getSelectedBundleByBundleIdOrAlias } from "../utilities/helper.js" // Import the function to be mocked
+import { selectBundleById } from "../utilities/project/selectBundleById.js"
+
+const runtimeLease = vi.hoisted(() => ({
+	runTask: vi.fn(),
+	isCurrent: vi.fn(),
+}))
 
 vi.mock("vscode", () => ({
 	commands: {
@@ -38,14 +43,36 @@ vi.mock("../utilities/messages/query.js", () => ({
 	getStringFromPattern: vi.fn(),
 }))
 
-// Mock the helper module
-vi.mock("../utilities/helper.js", () => ({
-	getSelectedBundleByBundleIdOrAlias: vi.fn(),
+vi.mock("../utilities/project/selectBundleById.js", () => ({
+	selectBundleById: vi.fn(),
+}))
+
+vi.mock("../utilities/project/projectRuntime.js", () => ({
+	getProjectRuntime: () => ({
+		activeProject: () => {
+			const project = state().project
+			return project
+				? {
+						project,
+						path: "/workspace/project.inlang",
+						isCurrent: runtimeLease.isCurrent,
+						runTask: runtimeLease.runTask,
+					}
+				: undefined
+		},
+	}),
 }))
 
 describe("editMessageCommand", () => {
 	beforeEach(() => {
 		vi.clearAllMocks()
+		vi.mocked(selectBundleById).mockReset()
+		vi.mocked(window.showInputBox).mockReset()
+		runtimeLease.isCurrent.mockReset().mockReturnValue(true)
+		runtimeLease.runTask.mockReset().mockImplementation(async (task: () => Promise<unknown>) => ({
+			status: "completed",
+			value: await task(),
+		}))
 	})
 
 	it("should show a message if the bundle is not found", async () => {
@@ -58,7 +85,7 @@ describe("editMessageCommand", () => {
 			},
 		})
 
-		vi.mocked(getSelectedBundleByBundleIdOrAlias).mockResolvedValueOnce(undefined)
+		vi.mocked(selectBundleById).mockResolvedValueOnce(undefined)
 
 		await editMessageCommand.callback({ bundleId: "testBundle", locale: "en" })
 
@@ -77,7 +104,7 @@ describe("editMessageCommand", () => {
 			},
 		})
 
-		vi.mocked(getSelectedBundleByBundleIdOrAlias).mockResolvedValueOnce(mockBundle)
+		vi.mocked(selectBundleById).mockResolvedValueOnce(mockBundle)
 
 		await editMessageCommand.callback({ bundleId: "testBundle", locale: "en" })
 
@@ -108,7 +135,7 @@ describe("editMessageCommand", () => {
 		})
 
 		// @ts-expect-error
-		vi.mocked(getSelectedBundleByBundleIdOrAlias).mockResolvedValueOnce(mockBundle)
+		vi.mocked(selectBundleById).mockResolvedValueOnce(mockBundle)
 
 		await editMessageCommand.callback({ bundleId: "testBundle", locale: "en" })
 
@@ -151,14 +178,50 @@ describe("editMessageCommand", () => {
 		})
 
 		// @ts-expect-error
-		vi.mocked(getSelectedBundleByBundleIdOrAlias).mockResolvedValueOnce(mockBundle)
+		vi.mocked(selectBundleById).mockResolvedValueOnce(mockBundle)
 
 		vi.mocked(window.showInputBox).mockResolvedValueOnce(undefined)
 
 		await editMessageCommand.callback({ bundleId: "testBundle", locale: "en" })
 
-		expect(state().project.db.transaction().execute).not.toHaveBeenCalled()
+		expect(state().project?.db.transaction().execute).not.toHaveBeenCalled()
 		expect(CONFIGURATION.EVENTS.ON_DID_EDIT_MESSAGE.fire).not.toHaveBeenCalled()
+	})
+
+	it("does not update a message after its project lease becomes stale", async () => {
+		const execute = vi.fn()
+		vi.mocked(state).mockReturnValue({
+			project: { db: { transaction: vi.fn(() => ({ execute })) } },
+		} as any)
+		vi.mocked(selectBundleById).mockResolvedValueOnce({
+			id: "testBundle",
+			declarations: [],
+			messages: [
+				{
+					id: "testMessage",
+					bundleId: "testBundle",
+					locale: "en",
+					selectors: [],
+					variants: [{ id: "testVariant", messageId: "testMessage", matches: [], pattern: [] }],
+				},
+			],
+		} as any)
+		vi.mocked(getStringFromPattern).mockReturnValue("Current content")
+		vi.mocked(getPatternFromString).mockReturnValue([])
+		vi.mocked(window.showInputBox).mockResolvedValueOnce("Updated content")
+		runtimeLease.runTask.mockImplementation(async (task: () => Promise<unknown>) =>
+			runtimeLease.runTask.mock.calls.length === 1
+				? { status: "completed", value: await task() }
+				: { status: "inactive" }
+		)
+
+		await editMessageCommand.callback({ bundleId: "testBundle", locale: "en" })
+
+		expect(runtimeLease.runTask).toHaveBeenCalledTimes(2)
+		expect(window.showInputBox).toHaveBeenCalledTimes(1)
+		expect(execute).not.toHaveBeenCalled()
+		expect(CONFIGURATION.EVENTS.ON_DID_EDIT_MESSAGE.fire).not.toHaveBeenCalled()
+		expect(msg).toHaveBeenCalledWith("The active project changed before the message was updated.")
 	})
 
 	it.todo("should update an existing message and variant", async () => {
@@ -189,7 +252,7 @@ describe("editMessageCommand", () => {
 		}
 
 		// @ts-expect-error
-		vi.mocked(getSelectedBundleByBundleIdOrAlias).mockResolvedValue(mockBundle)
+		vi.mocked(selectBundleById).mockResolvedValue(mockBundle)
 
 		const mockTransaction = {
 			execute: vi.fn().mockResolvedValue({}),
@@ -262,7 +325,7 @@ describe("editMessageCommand", () => {
 		})
 
 		// @ts-expect-error
-		vi.mocked(getSelectedBundleByBundleIdOrAlias).mockResolvedValue(mockBundle)
+		vi.mocked(selectBundleById).mockResolvedValue(mockBundle)
 		vi.mocked(window.showInputBox).mockResolvedValue("Updated content")
 
 		await editMessageCommand.callback({

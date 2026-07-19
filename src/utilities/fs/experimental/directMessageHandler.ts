@@ -9,22 +9,18 @@
 
 import * as vscode from "vscode"
 import * as path from "path"
-import { state } from "../../state.js"
 import { CONFIGURATION } from "../../../configuration.js"
 import { handleError } from "../../utils.js"
 import * as crypto from "crypto"
-import type { InlangDatabaseSchema } from "@inlang/sdk"
+import type { InlangDatabaseSchema, InlangProject } from "@inlang/sdk"
 import type { Kysely } from "kysely"
+import {
+	deactivateBeforeClose,
+	type Disposable,
+	type ProjectSession,
+} from "../../project/projectSession.js"
 
-// Store file hashes to detect real changes
-const fileHashes = new Map<string, string>()
-// Store message keys by file path to track deleted keys
-const fileMessageKeys = new Map<string, Set<string>>()
 const DEBOUNCE_MS = 150 // Reduced debounce time for faster updates
-const processingFiles = new Set<string>() // Prevent concurrent processing of the same file
-const lastFileUpdateTime = new Map<string, number>() // Track when files were last processed
-let isInEventLoop = false // Global flag to detect event loops
-let lastUIUpdateTime = 0 // Track when we last fired UI update events
 const MIN_UI_UPDATE_INTERVAL_MS = 300 // Minimum time between UI updates to prevent UI lag
 
 // Optimized file hash function that avoids full content hashing for large files
@@ -51,49 +47,37 @@ async function extractMessageKeys(uri: vscode.Uri): Promise<Set<string>> {
 	}
 }
 
-// Throttled UI update function to prevent UI lag from too many updates
-function throttledUIUpdate() {
-	const now = Date.now()
-	if (now - lastUIUpdateTime < MIN_UI_UPDATE_INTERVAL_MS) {
-		// Don't update if it's too soon after the last update
-		return false
-	}
-
-	// Update the last update time
-	lastUIUpdateTime = now
-
-	// Set the event loop flag
-	isInEventLoop = true
-
-	// Fire the event
-	CONFIGURATION.EVENTS.ON_DID_EDIT_MESSAGE.fire()
-
-	// Reset the flag after a short delay
-	setTimeout(() => {
-		isInEventLoop = false
-	}, 500) // Shorter timeout for better responsiveness
-
-	return true
-}
-
 // Optimized debounce function to prevent rapid-fire events
 function debounce<T extends (...args: any[]) => Promise<void>>(
 	func: T,
 	wait: number
-): (...args: Parameters<T>) => void {
+): ((...args: Parameters<T>) => void) & { cancel(): void; settled(): Promise<void> } {
 	let timeout: NodeJS.Timeout | null = null
+	const running = new Set<Promise<void>>()
 
-	return function (...args: Parameters<T>) {
+	const debounced = function (...args: Parameters<T>) {
 		if (timeout) {
 			clearTimeout(timeout)
 		}
 		timeout = setTimeout(() => {
-			func(...args).catch((error) => {
-				console.error("Error in debounced function:", error)
-			})
+			const execution = func(...args)
+			running.add(execution)
+			execution
+				.catch((error) => {
+					console.error("Error in debounced function:", error)
+				})
+				.finally(() => running.delete(execution))
 			timeout = null
 		}, wait)
 	}
+	debounced.cancel = () => {
+		if (timeout) clearTimeout(timeout)
+		timeout = null
+	}
+	debounced.settled = async () => {
+		await Promise.allSettled([...running])
+	}
+	return debounced
 }
 
 // Helper function to delete message variants by locale
@@ -147,11 +131,33 @@ async function deleteMessageVariantsByLocale(
 /**
  * Set up a watcher for message JSON files specifically
  */
-export async function setupDirectMessageWatcher(args: {
-	context: vscode.ExtensionContext
+export function setupDirectMessageWatcher(args: {
+	subscriptions: Disposable[]
 	workspaceFolder: vscode.WorkspaceFolder
-}) {
+	session: ProjectSession<InlangProject>
+}): Promise<void> {
 	try {
+		const fileHashes = new Map<string, string>()
+		const fileMessageKeys = new Map<string, Set<string>>()
+		const processingFiles = new Set<string>()
+		const lastFileUpdateTime = new Map<string, number>()
+		let isInEventLoop = false
+		let lastUIUpdateTime = 0
+		let eventLoopReset: NodeJS.Timeout | undefined
+
+		const throttledUIUpdate = () => {
+			const now = Date.now()
+			if (now - lastUIUpdateTime < MIN_UI_UPDATE_INTERVAL_MS) return false
+			lastUIUpdateTime = now
+			isInEventLoop = true
+			CONFIGURATION.EVENTS.ON_DID_EDIT_MESSAGE.fire()
+			if (eventLoopReset) clearTimeout(eventLoopReset)
+			eventLoopReset = setTimeout(() => {
+				isInEventLoop = false
+			}, 500)
+			return true
+		}
+
 		console.log("Setting up direct message watcher...")
 
 		// Create a watcher for JSON files in any 'messages' directory
@@ -160,15 +166,20 @@ export async function setupDirectMessageWatcher(args: {
 
 		console.log("Created message watcher for pattern: **/messages/*.json")
 
-		const messageFiles = await vscode.workspace.findFiles(messagePattern)
-		for (const uri of messageFiles) {
-			const filePath = uri.fsPath
-			fileHashes.set(filePath, await getFileHash(uri))
-			fileMessageKeys.set(filePath, await extractMessageKeys(uri))
-		}
+		const initialization = args.session
+			.runTask(async () => {
+				const messageFiles = await vscode.workspace.findFiles(messagePattern)
+				for (const uri of messageFiles) {
+					const filePath = uri.fsPath
+					fileHashes.set(filePath, await getFileHash(uri))
+					fileMessageKeys.set(filePath, await extractMessageKeys(uri))
+				}
+			})
+			.then(() => undefined)
+			.catch(handleError)
 
 		// Create debounced handler for message file events
-		const debouncedHandleMessageEvent = debounce(async (uri: vscode.Uri, eventType: string) => {
+		const handleMessageEvent = async (uri: vscode.Uri, eventType: string) => {
 			const filePath = uri.fsPath
 
 			// Skip if already processing
@@ -211,7 +222,7 @@ export async function setupDirectMessageWatcher(args: {
 				console.log(`Processing message file ${eventType} event: ${filePath}`)
 
 				// Get the current project
-				const currentProject = state().project
+				const currentProject = args.session.project
 				if (!currentProject) {
 					console.log("No current project found")
 					processingFiles.delete(filePath)
@@ -293,23 +304,20 @@ export async function setupDirectMessageWatcher(args: {
 								}
 							}
 
-							// If deletions happened, refresh the UI to reflect them
+							// Keep deletion processing observable for diagnostics.
 							if (madeChanges) {
-								console.log(`Made changes due to deleted keys, refreshing UI...`)
-
-								// Update UI with throttling for better performance
-								throttledUIUpdate()
+								console.log(`Made changes due to deleted keys`)
 							}
 						}
 
-						console.log(`External change detected, updating UI for locale: ${locale}`)
-						throttledUIUpdate()
+						console.log(`External change detected for locale: ${locale}`)
 
 						// Record this update time
 						lastFileUpdateTime.set(filePath, Date.now())
 					} catch (error) {
 						console.error(`Error importing message file:`, error)
 						handleError(error)
+						return false
 					}
 				} else {
 					console.log(`File deleted: ${filePath} - handling deletion for locale ${locale}`)
@@ -334,23 +342,25 @@ export async function setupDirectMessageWatcher(args: {
 						// Clear all message keys for deleted files
 						fileMessageKeys.delete(filePath)
 
-						// If deletions happened, refresh the UI to reflect them
+						// Keep deletion processing observable for diagnostics.
 						if (madeChanges) {
-							// Force update UI with throttling
-							throttledUIUpdate()
+							console.log(`Made changes due to deleted locale ${locale}`)
 						}
 					}
-
-					// Only update UI for genuine deletions with throttling
-					throttledUIUpdate()
 
 					// Record this update
 					lastFileUpdateTime.set(filePath, Date.now())
 				}
+				return true
 			} finally {
 				// Always remove from processing list
 				processingFiles.delete(filePath)
 			}
+		}
+
+		const debouncedHandleMessageEvent = debounce(async (uri: vscode.Uri, eventType: string) => {
+			const result = await args.session.runTask(() => handleMessageEvent(uri, eventType))
+			if (result.status === "completed" && result.value) throttledUIUpdate()
 		}, DEBOUNCE_MS)
 
 		// Attach event handlers
@@ -359,11 +369,26 @@ export async function setupDirectMessageWatcher(args: {
 		watcher.onDidDelete(async (e) => debouncedHandleMessageEvent(e, "Deleted"))
 
 		// Track and register watcher
-		args.context.subscriptions.push(watcher)
+		args.subscriptions.push(
+			deactivateBeforeClose({
+				dispose: async () => {
+					debouncedHandleMessageEvent.cancel()
+					if (eventLoopReset) clearTimeout(eventLoopReset)
+					watcher.dispose()
+					await debouncedHandleMessageEvent.settled()
+					fileHashes.clear()
+					fileMessageKeys.clear()
+					processingFiles.clear()
+					lastFileUpdateTime.clear()
+				},
+			})
+		)
 
 		console.log("Direct message watcher setup complete")
+		return initialization
 	} catch (error) {
 		console.error("Error setting up direct message watcher:", error)
 		handleError(error)
+		return Promise.resolve()
 	}
 }
