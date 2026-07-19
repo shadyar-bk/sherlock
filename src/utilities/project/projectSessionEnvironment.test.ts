@@ -1,16 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { InlangProject } from "@inlang/sdk"
-import crypto from "node:crypto"
 import type { FileSystem } from "../fs/createFileSystemMapper.js"
 
 const host = vi.hoisted(() => {
-	const watchers: Array<{
-		callbacks: Record<string, () => void>
-		dispose: ReturnType<typeof vi.fn>
-	}> = []
-	const fileContents = new Map<string, Uint8Array | Error>()
 	return {
 		loadProjectFromDirectory: vi.fn(),
+		watchProject: vi.fn(),
 		prepareProject: vi.fn(),
 		setActiveProject: vi.fn(),
 		registerCodeActionsProvider: vi.fn(),
@@ -18,36 +13,6 @@ const host = vi.hoisted(() => {
 		linterDiagnostics: vi.fn(),
 		handleError: vi.fn(),
 		projectChange: vi.fn(),
-		watchers,
-		fileContents,
-		readFile: vi.fn(async (uri: { fsPath: string }) => {
-			const content: Uint8Array | Error | undefined = fileContents.get(uri.fsPath)
-			if (content instanceof Error) throw content
-			if (!content) throw Object.assign(new Error("missing"), { code: "ENOENT" })
-			return content
-		}),
-		createFileSystemWatcher: vi.fn(() => {
-			const callbacks: Record<string, () => void> = {}
-			const watcher = {
-				callbacks,
-				onDidCreate: vi.fn((callback: () => void) => {
-					callbacks.create = callback
-				}),
-				onDidChange: vi.fn((callback: () => void) => {
-					callbacks.change = callback
-				}),
-				onDidDelete: vi.fn((callback: () => void) => {
-					callbacks.delete = callback
-				}),
-				dispose: vi.fn(),
-			}
-			watchers.push(watcher)
-			return watcher
-		}),
-		createResourceLoadTracker: vi.fn(() => ({
-			fs: { tracked: true },
-			snapshot: new Map(),
-		})),
 	}
 })
 
@@ -57,24 +22,22 @@ vi.mock("vscode", () => ({
 	languages: {
 		registerCodeActionsProvider: host.registerCodeActionsProvider,
 	},
-	workspace: {
-		createFileSystemWatcher: host.createFileSystemWatcher,
-		fs: { readFile: host.readFile },
-	},
 }))
 
 vi.mock("@inlang/sdk", () => ({
 	loadProjectFromDirectory: host.loadProjectFromDirectory,
 }))
 
+vi.mock("./projectResourceSynchronization.js", () => ({
+	projectResourceSynchronization: {
+		load: host.loadProjectFromDirectory,
+		watch: host.watchProject,
+	},
+}))
+
 vi.mock("../state.js", () => ({
 	prepareProject: host.prepareProject,
 	setActiveProject: host.setActiveProject,
-}))
-
-vi.mock("../fs/pluginResourceWatcher.js", async (importOriginal) => ({
-	...(await importOriginal<typeof import("../fs/pluginResourceWatcher.js")>()),
-	createResourceLoadTracker: host.createResourceLoadTracker,
 }))
 
 vi.mock("../../decorations/messagePreview.js", () => ({
@@ -153,29 +116,17 @@ function disposable(onDispose: () => unknown = vi.fn()) {
 	return { deactivate: onDispose, dispose: onDispose }
 }
 
-const bytes = (value: string) => new TextEncoder().encode(value)
-const fingerprint = (value: string) => crypto.createHash("sha256").update(value).digest("hex")
-const trackerWithSnapshot = (entries: Array<[string, string]>) => ({
-	fs: { tracked: true },
-	snapshot: new Map(entries),
-})
-
 beforeEach(() => {
 	vi.clearAllMocks()
 	host.loadProjectFromDirectory.mockReset()
-	host.createResourceLoadTracker.mockReset()
+	host.watchProject.mockReset()
+	host.watchProject.mockResolvedValue(undefined)
 	host.registerCodeActionsProvider.mockReset()
 	host.messagePreview.mockReset()
 	host.linterDiagnostics.mockReset()
-	host.createResourceLoadTracker.mockReturnValue({
-		fs: { tracked: true },
-		snapshot: new Map(),
-	})
 	host.registerCodeActionsProvider.mockImplementation(() => disposable())
 	host.messagePreview.mockImplementation(() => undefined)
 	host.linterDiagnostics.mockResolvedValue(undefined)
-	host.watchers.length = 0
-	host.fileContents.clear()
 })
 
 afterEach(() => {
@@ -192,10 +143,7 @@ describe("project session environment", () => {
 			status: "committed",
 		})
 
-		expect(host.loadProjectFromDirectory).toHaveBeenCalledWith({
-			path: "/first.inlang",
-			fs: { tracked: true },
-		})
+		expect(host.loadProjectFromDirectory).toHaveBeenCalledWith("/first.inlang")
 		expect(host.prepareProject).toHaveBeenCalledWith(project)
 		expect(host.setActiveProject).toHaveBeenLastCalledWith({
 			project,
@@ -433,7 +381,7 @@ describe("project session environment", () => {
 		await vi.waitFor(() => expect(host.handleError).toHaveBeenCalledWith(error))
 	})
 
-	it("reconciles the committed watcher from its own overlapping project snapshot", async () => {
+	it("reconciles the committed session when resource synchronization requests it", async () => {
 		vi.useFakeTimers()
 		const resourcePath = "/resources/messages.json"
 		const first = fakeProject("first", [], [resourcePath])
@@ -446,11 +394,9 @@ describe("project session environment", () => {
 		;(latest.plugins.get as ReturnType<typeof vi.fn>)
 			.mockReturnValueOnce(latestPreparation.promise)
 			.mockResolvedValue(latestPlugins)
-		host.fileContents.set(resourcePath, bytes("current"))
-		host.createResourceLoadTracker
-			.mockReturnValueOnce(trackerWithSnapshot([[resourcePath, fingerprint("current")]]))
-			.mockReturnValueOnce(trackerWithSnapshot([[resourcePath, fingerprint("current")]]))
-			.mockReturnValueOnce(trackerWithSnapshot([[resourcePath, fingerprint("during-latest-load")]]))
+		host.watchProject.mockImplementation(async (session) => {
+			if (session.project === latest) session.requestReconciliation()
+		})
 		host.loadProjectFromDirectory
 			.mockResolvedValueOnce(first)
 			.mockReturnValueOnce(slow.promise)
@@ -477,11 +423,12 @@ describe("project session environment", () => {
 	it("closes the previous project before the next watcher becomes authoritative", async () => {
 		const first = fakeProject("first", [], ["/resources/first.json"])
 		const second = fakeProject("second", [], ["/resources/second.json"])
-		host.fileContents.set("/resources/first.json", bytes("first"))
-		host.fileContents.set("/resources/second.json", bytes("second"))
-		host.createResourceLoadTracker
-			.mockReturnValueOnce(trackerWithSnapshot([["/resources/first.json", fingerprint("first")]]))
-			.mockReturnValueOnce(trackerWithSnapshot([["/resources/second.json", fingerprint("second")]]))
+		const synchronizedResources: Array<ReturnType<typeof disposable>> = []
+		host.watchProject.mockImplementation(async (session) => {
+			const resource = disposable()
+			synchronizedResources.push(resource)
+			session.own(resource)
+		})
 		host.loadProjectFromDirectory.mockResolvedValueOnce(first).mockResolvedValueOnce(second)
 		const runtime = createProjectSessionEnvironment({ fileSystem })
 		await runtime.replaceProject("/first.inlang")
@@ -489,21 +436,20 @@ describe("project session environment", () => {
 		await runtime.replaceProject("/second.inlang")
 
 		expect((first.close as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]).toBeLessThan(
-			host.createFileSystemWatcher.mock.invocationCallOrder[1]!
+			host.watchProject.mock.invocationCallOrder[1]!
 		)
-		expect(host.watchers[0]?.dispose).toHaveBeenCalledTimes(1)
+		expect(synchronizedResources[0]?.dispose).toHaveBeenCalledTimes(1)
 		await runtime.dispose()
 	})
 
-	it("reconciles a resource change across the load-to-watch handoff", async () => {
+	it("reconciles a resource change reported during the load-to-watch handoff", async () => {
 		vi.useFakeTimers()
 		const resourcePath = "/resources/messages.json"
 		const initial = fakeProject("initial", [], [resourcePath])
 		const reconciled = fakeProject("reconciled")
-		host.fileContents.set(resourcePath, bytes("after-load"))
-		host.createResourceLoadTracker.mockReturnValueOnce(
-			trackerWithSnapshot([[resourcePath, fingerprint("during-load")]])
-		)
+		host.watchProject.mockImplementationOnce(async (session) => {
+			session.requestReconciliation()
+		})
 		host.loadProjectFromDirectory.mockResolvedValueOnce(initial).mockResolvedValueOnce(reconciled)
 		const runtime = createProjectSessionEnvironment({ fileSystem })
 
@@ -521,17 +467,14 @@ describe("project session environment", () => {
 		const first = fakeProject("first", [], [resourcePath])
 		const second = fakeProject("second")
 		const secondLoad = deferred<InlangProject>()
-		host.fileContents.set(resourcePath, bytes("first"))
-		host.createResourceLoadTracker.mockReturnValueOnce(
-			trackerWithSnapshot([[resourcePath, fingerprint("first")]])
-		)
+		host.watchProject.mockImplementationOnce(async (session) => {
+			setTimeout(() => session.requestReconciliation(), 150)
+		})
 		host.loadProjectFromDirectory
 			.mockResolvedValueOnce(first)
 			.mockReturnValueOnce(secondLoad.promise)
 		const runtime = createProjectSessionEnvironment({ fileSystem })
 		await runtime.replaceProject("/first.inlang")
-		host.fileContents.set(resourcePath, bytes("changed"))
-		host.watchers[0]?.callbacks.change?.()
 		await vi.advanceTimersByTimeAsync(1)
 
 		const explicitReplacement = runtime.replaceProject("/second.inlang")
@@ -549,18 +492,15 @@ describe("project session environment", () => {
 		const first = fakeProject("first", [], [resourcePath])
 		const reconciled = fakeProject("reconciled")
 		const secondLoad = deferred<InlangProject>()
-		host.fileContents.set(resourcePath, bytes("first"))
-		host.createResourceLoadTracker.mockReturnValueOnce(
-			trackerWithSnapshot([[resourcePath, fingerprint("first")]])
-		)
+		host.watchProject.mockImplementationOnce(async (session) => {
+			setTimeout(() => session.requestReconciliation(), 150)
+		})
 		host.loadProjectFromDirectory
 			.mockResolvedValueOnce(first)
 			.mockReturnValueOnce(secondLoad.promise)
 			.mockResolvedValueOnce(reconciled)
 		const runtime = createProjectSessionEnvironment({ fileSystem })
 		await runtime.replaceProject("/first.inlang")
-		host.fileContents.set(resourcePath, bytes("changed"))
-		host.watchers[0]?.callbacks.change?.()
 		await vi.advanceTimersByTimeAsync(1)
 
 		const failedReplacement = runtime.replaceProject("/second.inlang")
@@ -575,7 +515,7 @@ describe("project session environment", () => {
 	it("reports watcher setup failure without changing committed replacement semantics", async () => {
 		const watcherError = new Error("watcher setup failed")
 		const project = fakeProject("active")
-		;(project.settings.get as ReturnType<typeof vi.fn>).mockRejectedValue(watcherError)
+		host.watchProject.mockRejectedValueOnce(watcherError)
 		host.loadProjectFromDirectory.mockResolvedValue(project)
 		const runtime = createProjectSessionEnvironment({ fileSystem })
 
@@ -613,9 +553,11 @@ describe("project session environment", () => {
 
 	it("bounds repeated shutdown and disposes the active watcher once", async () => {
 		vi.useFakeTimers()
-		const resourcePath = "/resources/messages.json"
-		const project = fakeProject("active", [], [resourcePath])
-		host.fileContents.set(resourcePath, bytes("active"))
+		const project = fakeProject("active")
+		const synchronizedResource = disposable()
+		host.watchProject.mockImplementationOnce(async (session) => {
+			session.own(synchronizedResource)
+		})
 		host.loadProjectFromDirectory.mockResolvedValue(project)
 		const runtime = createProjectSessionEnvironment({ fileSystem })
 		await runtime.replaceProject("/active.inlang")
@@ -627,8 +569,7 @@ describe("project session environment", () => {
 		await vi.advanceTimersByTimeAsync(1_001)
 		await Promise.all([firstDisposal, secondDisposal])
 
-		expect(host.watchers).toHaveLength(1)
-		expect(host.watchers[0]?.dispose).toHaveBeenCalledTimes(1)
+		expect(synchronizedResource.dispose).toHaveBeenCalledTimes(1)
 		expect(project.close).not.toHaveBeenCalled()
 	})
 })
