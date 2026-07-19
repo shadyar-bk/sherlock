@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { InlangProject } from "@inlang/sdk"
 import crypto from "node:crypto"
 import type { FileSystem } from "../fs/createFileSystemMapper.js"
@@ -176,6 +176,10 @@ beforeEach(() => {
 	host.linterDiagnostics.mockResolvedValue(undefined)
 	host.watchers.length = 0
 	host.fileContents.clear()
+})
+
+afterEach(() => {
+	vi.useRealTimers()
 })
 
 describe("project session environment", () => {

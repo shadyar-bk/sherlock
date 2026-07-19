@@ -13,8 +13,14 @@ import {
 } from "../fs/pluginResourceWatcher.js"
 import { prepareProject, setActiveProject } from "../state.js"
 import { handleError } from "../utils.js"
-import { createProjectRuntime, type ProjectRuntime } from "./projectRuntime.js"
-import { deactivateBeforeClose } from "./projectSession.js"
+import type { ProjectRuntime } from "./projectRuntime.js"
+import {
+	createProjectSessionLifecycle,
+	deactivateBeforeClose,
+	type Disposable,
+	type PreparedProjectSession,
+	type ProjectSession,
+} from "./projectSession.js"
 
 export type ProjectSessionEnvironmentArgs = {
 	fileSystem: FileSystem
@@ -29,7 +35,7 @@ export function createProjectSessionEnvironment(
 		ReturnType<typeof createResourceLoadTracker>["snapshot"]
 	>()
 
-	return createProjectRuntime({
+	return createEnvironmentRuntime({
 		loadProject: async (projectPath) => {
 			const loadTracker = createResourceLoadTracker(nodeFs)
 			const project = await loadProjectFromDirectory({ path: projectPath, fs: loadTracker.fs })
@@ -90,5 +96,52 @@ async function handleInlangErrors(project: InlangProject) {
 	const inlangErrors = (await project.errors.get()) || []
 	if (inlangErrors.length > 0) {
 		console.error("Extension errors (Sherlock):", inlangErrors)
+	}
+}
+
+function createEnvironmentRuntime<Project extends { close(): Promise<void> }>(args: {
+	loadProject(path: string): Promise<Project>
+	prepareSession(
+		session: ProjectSession<Project>,
+		resources: Disposable[]
+	): Promise<PreparedProjectSession>
+	publishActiveSession(session: ProjectSession<Project> | undefined): void
+	onDidReplaceSession?(session: ProjectSession<Project>): Promise<void> | void
+	onError?(
+		error: unknown,
+		phase: "cleanup" | "activation" | "notification" | "reconciliation"
+	): void
+}): ProjectRuntime<Project> {
+	let activeSession: ProjectSession<Project> | undefined
+	let lastRequestedProjectPath: string | undefined
+	const lifecycle = createProjectSessionLifecycle({
+		loadProject: args.loadProject,
+		prepareSession: args.prepareSession,
+		setActiveSession: (session) => {
+			args.publishActiveSession(session)
+			activeSession = session
+		},
+		onDidReplaceSession: args.onDidReplaceSession,
+		onError: args.onError,
+	})
+
+	return {
+		replaceProject(path) {
+			lastRequestedProjectPath = path
+			return lifecycle.replaceProject(path)
+		},
+		activeProject() {
+			const session = activeSession
+			if (!session) return undefined
+			return {
+				path: session.path,
+				project: session.project,
+				isCurrent: () => activeSession === session,
+				own: (resource) => session.own(resource),
+				runTask: (task) => session.runTask(task),
+			}
+		},
+		lastRequestedProjectPath: () => lastRequestedProjectPath,
+		dispose: lifecycle.dispose,
 	}
 }
