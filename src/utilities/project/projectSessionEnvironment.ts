@@ -7,7 +7,10 @@ import { messagePreview } from "../../decorations/messagePreview.js"
 import { linterDiagnostics } from "../../diagnostics/linterDiagnostics.js"
 import type { MessageViewController } from "../messages/messages.js"
 import type { FileSystem } from "../fs/createFileSystemMapper.js"
-import { createResourceLoadTracker } from "../fs/pluginResourceWatcher.js"
+import {
+	createResourceLoadTracker,
+	setupPluginResourceWatcher,
+} from "../fs/pluginResourceWatcher.js"
 import { prepareProject, setActiveProject } from "../state.js"
 import { handleError } from "../utils.js"
 import { createProjectRuntime, type ProjectRuntime } from "./projectRuntime.js"
@@ -62,9 +65,30 @@ export function createProjectSessionEnvironment(
 						resources.push(deactivateBeforeClose(args.messageView.bindProject(session)))
 					}
 				},
+				afterPreviousDisposed: async () => {
+					await setupPluginResourceWatcher({
+						session,
+						loadSnapshot: resourceLoadSnapshots.get(session.project),
+						onError: handleError,
+					})
+					await session
+						.runTask(async () => {
+							await handleInlangErrors(session.project)
+						})
+						.catch(handleError)
+				},
 			}
 		},
 		publishActiveSession: (session) =>
 			setActiveProject(session ? { project: session.project, path: session.path } : undefined),
+		onDidReplaceSession: () => CONFIGURATION.EVENTS.ON_DID_PROJECT_CHANGE.fire(undefined),
+		onError: (error) => handleError(error),
 	})
+}
+
+async function handleInlangErrors(project: InlangProject) {
+	const inlangErrors = (await project.errors.get()) || []
+	if (inlangErrors.length > 0) {
+		console.error("Extension errors (Sherlock):", inlangErrors)
+	}
 }
