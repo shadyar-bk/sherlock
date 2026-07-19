@@ -14,30 +14,17 @@ import { capture } from "./services/telemetry/index.js"
 import packageJson from "../package.json" with { type: "json" }
 import { statusBar } from "./utilities/settings/statusBar.js"
 import fg from "fast-glob"
-import { saveProjectToDirectory, type InlangProject } from "@inlang/sdk"
+import type { InlangProject } from "@inlang/sdk"
 import type { ActiveProjectLease } from "./utilities/project/projectRuntime.js"
 import path from "node:path"
-import { runWithPluginResourceWrite } from "./utilities/fs/pluginResourceWatcher.js"
-import { trackFileSystemMutations } from "./utilities/fs/trackFileSystemMutations.js"
 import {
 	disposeProjectRuntime,
 	getProjectRuntime,
 	installProjectRuntime,
 } from "./utilities/project/projectRuntime.js"
 import { createProjectSessionEnvironment } from "./utilities/project/projectSessionEnvironment.js"
+import { saveProjectResources } from "./utilities/project/projectResourceSynchronization.js"
 //import { initErrorMonitoring } from "./services/error-monitoring/implementation.js"
-
-type JsonObject = Record<string, unknown>
-type DottedMessageKeySnapshot = {
-	messageFilePath: string
-	locale: string
-	keys: Map<
-		string,
-		{
-			hadNestedPath: boolean
-		}
-	>
-}
 
 // Entry Point
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -184,185 +171,10 @@ export async function saveProject(
 ) {
 	if (!lease) return "inactive" as const
 	try {
-		const result = await lease.runTask(() => saveProjectData(lease.project, lease.path))
+		const result = await lease.runTask(() => saveProjectResources(lease.project, lease.path))
 		return result.status === "completed" ? ("saved" as const) : ("inactive" as const)
 	} catch (error) {
 		handleError(error)
 		return "failed" as const
 	}
-}
-
-/** Persists a project that is still owned by a session during awaited teardown. */
-export async function saveProjectData(project: InlangProject, projectPath: string) {
-	await runWithPluginResourceWrite(project, async (recordResourceWrite) => {
-		const dottedKeySnapshots = await snapshotExplicitDottedMessageKeys(project, projectPath)
-		const trackedFileSystem = trackFileSystemMutations(fs, recordResourceWrite)
-
-		await saveProjectToDirectory({
-			fs: createFileSystemMapper(projectPath, trackedFileSystem),
-			project,
-			path: projectPath,
-		})
-
-		await restoreExplicitDottedMessageKeys(dottedKeySnapshots, trackedFileSystem)
-	})
-}
-
-async function snapshotExplicitDottedMessageKeys(
-	project: InlangProject,
-	selectedProjectPath: string
-): Promise<DottedMessageKeySnapshot[]> {
-	const settings = await project.settings.get()
-	const pathPattern = getJsonPathPattern(settings)
-	if (!pathPattern) return []
-
-	const snapshots: DottedMessageKeySnapshot[] = []
-	for (const locale of settings.locales) {
-		const messageFilePath = getMessageFilePath(selectedProjectPath, pathPattern, locale)
-		const json = await readJsonObject(messageFilePath).catch(() => undefined)
-		if (!json) continue
-
-		const keys = new Map<string, { hadNestedPath: boolean }>()
-		for (const key of Object.keys(json)) {
-			if (key === "$schema" || !key.includes(".")) continue
-			keys.set(key, {
-				hadNestedPath: hasNestedPath(json, key.split(".")),
-			})
-		}
-
-		if (keys.size > 0) {
-			snapshots.push({ messageFilePath, locale, keys })
-		}
-	}
-
-	return snapshots
-}
-
-async function restoreExplicitDottedMessageKeys(
-	snapshots: DottedMessageKeySnapshot[],
-	fileSystem: FileSystem
-) {
-	for (const snapshot of snapshots) {
-		const originalContent = await fileSystem
-			.readFile(snapshot.messageFilePath, "utf8")
-			.catch(() => undefined)
-		if (originalContent === undefined) continue
-
-		const json = parseJsonObject(originalContent)
-		if (!json) continue
-
-		let changed = false
-		for (const [key, savedKey] of snapshot.keys) {
-			const exportedValue = getNestedPath(json, key.split("."))
-			if (exportedValue === undefined) {
-				continue
-			}
-
-			if (json[key] !== exportedValue) {
-				json[key] = exportedValue
-				changed = true
-			}
-
-			if (!savedKey.hadNestedPath && deleteNestedPath(json, key.split("."))) {
-				changed = true
-			}
-		}
-
-		if (!changed) continue
-
-		const restoredContent = stringifyJsonObject(json, {
-			indent: detectJsonIndent(originalContent),
-			trailingNewline: originalContent.endsWith("\n"),
-		})
-		await fileSystem.writeFile(snapshot.messageFilePath, restoredContent)
-	}
-}
-
-function getJsonPathPattern(settings: Awaited<ReturnType<InlangProject["settings"]["get"]>>) {
-	const pathPattern =
-		(settings as any)["plugin.inlang.json"]?.pathPattern ??
-		(settings as any)["plugin.inlang.messageFormat"]?.pathPattern
-
-	return typeof pathPattern === "string" ? pathPattern : undefined
-}
-
-function getMessageFilePath(selectedProjectPath: string, pathPattern: string, locale: string) {
-	const projectDirectory = path.dirname(selectedProjectPath)
-	return path.resolve(
-		projectDirectory,
-		pathPattern.replace("{languageTag}", locale).replace("{locale}", locale)
-	)
-}
-
-async function readJsonObject(filePath: string) {
-	return parseJsonObject(await fs.readFile(filePath, "utf8"))
-}
-
-function parseJsonObject(content: string) {
-	const json = JSON.parse(content)
-	return isJsonObject(json) ? json : undefined
-}
-
-function isJsonObject(value: unknown): value is JsonObject {
-	return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-function hasNestedPath(json: JsonObject, pathParts: string[]) {
-	return getNestedPath(json, pathParts) !== undefined
-}
-
-function getNestedPath(json: JsonObject, pathParts: string[]) {
-	let current: unknown = json
-	for (const part of pathParts) {
-		if (!isJsonObject(current) || !(part in current)) {
-			return undefined
-		}
-		current = current[part]
-	}
-	return current
-}
-
-function deleteNestedPath(json: JsonObject, pathParts: string[]) {
-	if (pathParts.length < 2) return false
-
-	const parents: Array<{ object: JsonObject; key: string }> = []
-	let current: JsonObject = json
-	for (const part of pathParts.slice(0, -1)) {
-		const next = current[part]
-		if (!isJsonObject(next)) {
-			return false
-		}
-		parents.push({ object: current, key: part })
-		current = next
-	}
-
-	const leafKey = pathParts[pathParts.length - 1]
-	if (leafKey === undefined || !(leafKey in current)) {
-		return false
-	}
-
-	delete current[leafKey]
-
-	for (let index = parents.length - 1; index >= 0; index -= 1) {
-		const { object, key } = parents[index]!
-		const child = object[key]
-		if (isJsonObject(child) && Object.keys(child).length === 0) {
-			delete object[key]
-			continue
-		}
-		break
-	}
-
-	return true
-}
-
-function stringifyJsonObject(
-	json: JsonObject,
-	format: { indent: string | number; trailingNewline: boolean }
-) {
-	return `${JSON.stringify(json, undefined, format.indent)}${format.trailingNewline ? "\n" : ""}`
-}
-
-function detectJsonIndent(content: string) {
-	return content.match(/\n(\s+)"/)?.[1] ?? "\t"
 }

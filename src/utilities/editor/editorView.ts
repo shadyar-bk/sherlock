@@ -10,7 +10,8 @@ import { deleteVariant } from "./helper/deleteVariant.js"
 import { deleteBundleNested } from "./helper/deleteBundleNested.js"
 import { handleUpdateBundle } from "./helper/handleBundleUpdate.js"
 import { createMessage } from "./helper/createMessage.js"
-import { saveProject, saveProjectData } from "../../main.js"
+import { saveProject } from "../../main.js"
+import { saveProjectResources } from "../project/projectResourceSynchronization.js"
 import type { InlangProject } from "@inlang/sdk"
 import type { ActiveProjectLease } from "../project/projectRuntime.js"
 import { selectBundleById } from "../project/selectBundleById.js"
@@ -334,7 +335,7 @@ export function editorView(args: {
 		await pendingPersistence
 		if (options.persist && editRevision > persistedRevision) {
 			const revision = editRevision
-			await saveProjectData(lease.project, lease.path)
+			await saveProjectResources(lease.project, lease.path)
 			persistedRevision = Math.max(persistedRevision, revision)
 		}
 		const currentPanel = panel

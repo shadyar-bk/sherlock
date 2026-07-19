@@ -12,7 +12,7 @@ import {
 	type NewBundleNested,
 } from "@inlang/sdk"
 import { v4 as uuidv4 } from "uuid"
-import { saveProjectData } from "../main.js"
+import { saveProjectResources } from "../utilities/project/projectResourceSynchronization.js"
 import { getProjectRuntime } from "../utilities/project/projectRuntime.js"
 
 /**
@@ -162,7 +162,7 @@ export const extractMessageCommand = {
 					editor.replace(textEditor.selection, preparedExtractOption)
 				})
 
-				await saveProjectData(lease.project, lease.path)
+				await saveProjectResources(lease.project, lease.path)
 				return true
 			})
 			if (extracted.status !== "completed") {

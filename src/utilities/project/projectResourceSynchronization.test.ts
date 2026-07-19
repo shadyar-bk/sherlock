@@ -9,11 +9,39 @@ const host = vi.hoisted(() => {
 		callbacks: { change?: Callback; create?: Callback; delete?: Callback }
 		dispose: ReturnType<typeof vi.fn>
 	}> = []
+	const nodeFileSystem = {
+		readFile: vi.fn(async (filePath: string, options?: string | { encoding?: string }) => {
+			const content = contents.get(filePath)
+			if (!content) throw Object.assign(new Error("missing"), { code: "ENOENT" })
+			const encoding = typeof options === "string" ? options : options?.encoding
+			return encoding ? new TextDecoder().decode(content) : content
+		}),
+		writeFile: vi.fn(async (filePath: string, data: string | Uint8Array) => {
+			contents.set(
+				filePath,
+				typeof data === "string" ? new TextEncoder().encode(data) : new Uint8Array(data)
+			)
+		}),
+		mkdir: vi.fn(),
+		rmdir: vi.fn(),
+		rm: vi.fn(),
+		unlink: vi.fn(),
+		readdir: vi.fn(),
+		readlink: vi.fn(),
+		symlink: vi.fn(),
+		stat: vi.fn(),
+		lstat: vi.fn(),
+		watch: vi.fn(),
+		access: vi.fn(),
+		copyFile: vi.fn(),
+	}
 	return {
 		contents,
 		watchers,
+		nodeFileSystem,
 		patterns: [] as Array<{ base: string; pattern: string }>,
 		loadProjectFromDirectory: vi.fn(),
+		saveProjectToDirectory: vi.fn(),
 		nodeReadFile: vi.fn(async (filePath: string) => {
 			const content = contents.get(filePath)
 			if (!content) throw Object.assign(new Error("missing"), { code: "ENOENT" })
@@ -43,8 +71,11 @@ vi.mock("node:fs", () => ({
 	promises: { readFile: host.nodeReadFile },
 }))
 
+vi.mock("node:fs/promises", () => ({ default: host.nodeFileSystem }))
+
 vi.mock("@inlang/sdk", () => ({
 	loadProjectFromDirectory: host.loadProjectFromDirectory,
+	saveProjectToDirectory: host.saveProjectToDirectory,
 }))
 
 vi.mock("vscode", () => ({
@@ -80,6 +111,14 @@ function createSession(project: any, projectPath: string) {
 	}
 }
 
+function deferred<T>() {
+	let resolve!: (value: T) => void
+	const promise = new Promise<T>((resolvePromise) => {
+		resolve = resolvePromise
+	})
+	return { promise, resolve }
+}
+
 beforeEach(() => {
 	vi.clearAllMocks()
 	host.contents.clear()
@@ -90,6 +129,169 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers())
 
 describe("project resource synchronization", () => {
+	it("saves a project through the SDK exporter", async () => {
+		const projectPath = path.join(path.sep, "workspace", "project.inlang")
+		const project = {
+			settings: { get: vi.fn(async () => ({ baseLocale: "en", locales: [] })) },
+		}
+		const synchronization = createProjectResourceSynchronization()
+
+		await synchronization.save(project as any, projectPath)
+
+		expect(host.saveProjectToDirectory).toHaveBeenCalledWith(
+			expect.objectContaining({ project, path: projectPath })
+		)
+	})
+
+	it("preserves explicit dotted JSON keys across SDK export", async () => {
+		const projectPath = path.join(path.sep, "workspace", "project.inlang")
+		const resourcePath = path.join(path.sep, "workspace", "messages", "en.json")
+		const project = {
+			settings: {
+				get: vi.fn(async () => ({
+					baseLocale: "en",
+					locales: ["en"],
+					"plugin.inlang.json": { pathPattern: "./messages/{languageTag}.json" },
+				})),
+			},
+		}
+		host.contents.set(resourcePath, new TextEncoder().encode('{"menu.file":"Open"}\n'))
+		host.saveProjectToDirectory.mockImplementationOnce(async ({ fs }) => {
+			await fs.writeFile("../messages/en.json", '{"menu":{"file":"Open"}}\n')
+		})
+
+		await createProjectResourceSynchronization().save(project as any, projectPath)
+
+		expect(JSON.parse(new TextDecoder().decode(host.contents.get(resourcePath)))).toEqual({
+			"menu.file": "Open",
+		})
+	})
+
+	it("acknowledges an exact Sherlock resource write without requesting reconciliation", async () => {
+		vi.useFakeTimers()
+		const projectPath = path.join(path.sep, "workspace", "project.inlang")
+		const resourcePath = path.join(path.sep, "workspace", "translations", "en.json")
+		const project = {
+			settings: { get: vi.fn(async () => ({ baseLocale: "en", locales: ["en"] })) },
+			plugins: {
+				get: vi.fn(async () => [
+					{
+						key: "plugin.example",
+						importFiles: vi.fn(),
+						toBeImportedFiles: vi.fn(async () => [{ path: resourcePath, locale: "en" }]),
+					},
+				]),
+			},
+		}
+		host.contents.set(resourcePath, new TextEncoder().encode("initial"))
+		const session = createSession(project, projectPath)
+		const synchronization = createProjectResourceSynchronization()
+		await synchronization.watch(session as any)
+		host.saveProjectToDirectory.mockImplementationOnce(async ({ fs }) => {
+			await fs.writeFile("../translations/en.json", "saved by Sherlock")
+			host.watchers[0]?.callbacks.change?.({ fsPath: resourcePath })
+		})
+
+		await synchronization.save(project as any, projectPath)
+		await vi.advanceTimersByTimeAsync(150)
+
+		expect(session.requestReconciliation).not.toHaveBeenCalled()
+		await session.ownedResources[0]?.dispose()
+	})
+
+	it("reconciles an external resource edit that overlaps a Sherlock save", async () => {
+		vi.useFakeTimers()
+		const projectPath = path.join(path.sep, "workspace", "project.inlang")
+		const resourcePath = path.join(path.sep, "workspace", "translations", "en.json")
+		const project = {
+			settings: { get: vi.fn(async () => ({ baseLocale: "en", locales: ["en"] })) },
+			plugins: {
+				get: vi.fn(async () => [
+					{
+						key: "plugin.example",
+						importFiles: vi.fn(),
+						toBeImportedFiles: vi.fn(async () => [{ path: resourcePath, locale: "en" }]),
+					},
+				]),
+			},
+		}
+		host.contents.set(resourcePath, new TextEncoder().encode("initial"))
+		const session = createSession(project, projectPath)
+		const synchronization = createProjectResourceSynchronization()
+		await synchronization.watch(session as any)
+		host.saveProjectToDirectory.mockImplementationOnce(async ({ fs }) => {
+			await fs.writeFile("../translations/en.json", "saved by Sherlock")
+			host.contents.set(resourcePath, new TextEncoder().encode("edited externally"))
+			host.watchers[0]?.callbacks.change?.({ fsPath: resourcePath })
+		})
+
+		await synchronization.save(project as any, projectPath)
+		await vi.advanceTimersByTimeAsync(150)
+
+		expect(session.requestReconciliation).toHaveBeenCalledOnce()
+		await session.ownedResources[0]?.dispose()
+	})
+
+	it("acknowledges a Sherlock resource deletion without requesting reconciliation", async () => {
+		vi.useFakeTimers()
+		const projectPath = path.join(path.sep, "workspace", "project.inlang")
+		const resourcePath = path.join(path.sep, "workspace", "translations", "en.json")
+		const project = {
+			settings: { get: vi.fn(async () => ({ baseLocale: "en", locales: ["en"] })) },
+			plugins: {
+				get: vi.fn(async () => [
+					{
+						key: "plugin.example",
+						importFiles: vi.fn(),
+						toBeImportedFiles: vi.fn(async () => [{ path: resourcePath, locale: "en" }]),
+					},
+				]),
+			},
+		}
+		host.contents.set(resourcePath, new TextEncoder().encode("initial"))
+		const session = createSession(project, projectPath)
+		const synchronization = createProjectResourceSynchronization()
+		await synchronization.watch(session as any)
+		host.saveProjectToDirectory.mockImplementationOnce(async ({ fs }) => {
+			await fs.unlink("../translations/en.json")
+			host.contents.delete(resourcePath)
+			host.watchers[0]?.callbacks.delete?.({ fsPath: resourcePath })
+		})
+
+		await synchronization.save(project as any, projectPath)
+		await vi.advanceTimersByTimeAsync(150)
+
+		expect(session.requestReconciliation).not.toHaveBeenCalled()
+		await session.ownedResources[0]?.dispose()
+	})
+
+	it("serializes concurrent saves for the same project", async () => {
+		const projectPath = path.join(path.sep, "workspace", "project.inlang")
+		const project = {
+			settings: { get: vi.fn(async () => ({ baseLocale: "en", locales: [] })) },
+		}
+		const firstSave = deferred<void>()
+		const order: string[] = []
+		host.saveProjectToDirectory
+			.mockImplementationOnce(async () => {
+				order.push("first started")
+				await firstSave.promise
+				order.push("first finished")
+			})
+			.mockImplementationOnce(async () => {
+				order.push("second started")
+			})
+		const synchronization = createProjectResourceSynchronization()
+
+		const first = synchronization.save(project as any, projectPath)
+		const second = synchronization.save(project as any, projectPath)
+		await vi.waitFor(() => expect(order).toEqual(["first started"]))
+		firstSave.resolve()
+		await Promise.all([first, second])
+
+		expect(order).toEqual(["first started", "first finished", "second started"])
+	})
+
 	it("reconciles a resource change across the load-to-watch handoff", async () => {
 		const resourcePath = path.join(path.sep, "workspace", "resources", "en.json")
 		const projectPath = path.join(path.sep, "workspace", "project.inlang")
