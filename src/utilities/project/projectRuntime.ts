@@ -1,9 +1,6 @@
 import {
-	createProjectSessionLifecycle,
 	type Disposable,
-	type ProjectSession,
 	type ProjectReplacementResult,
-	type PreparedProjectSession,
 	type ProjectTaskResult,
 } from "./projectSession.js"
 
@@ -22,53 +19,6 @@ export type ProjectRuntime<Project extends CloseableProject> = {
 	activeProject(): ActiveProjectLease<Project> | undefined
 	lastRequestedProjectPath(): string | undefined
 	dispose(): Promise<void>
-}
-
-export function createProjectRuntime<Project extends CloseableProject>(args: {
-	loadProject(path: string): Promise<Project>
-	prepareSession(
-		session: ProjectSession<Project>,
-		resources: Disposable[]
-	): Promise<PreparedProjectSession>
-	publishActiveSession(session: ProjectSession<Project> | undefined): void
-	onDidReplaceSession?(session: ProjectSession<Project>): Promise<void> | void
-	onError?(
-		error: unknown,
-		phase: "cleanup" | "activation" | "notification" | "reconciliation"
-	): void
-}): ProjectRuntime<Project> {
-	let activeSession: ProjectSession<Project> | undefined
-	let lastRequestedProjectPath: string | undefined
-	const lifecycle = createProjectSessionLifecycle({
-		loadProject: args.loadProject,
-		prepareSession: args.prepareSession,
-		setActiveSession: (session) => {
-			args.publishActiveSession(session)
-			activeSession = session
-		},
-		onDidReplaceSession: args.onDidReplaceSession,
-		onError: args.onError,
-	})
-
-	return {
-		replaceProject(path) {
-			lastRequestedProjectPath = path
-			return lifecycle.replaceProject(path)
-		},
-		activeProject() {
-			const session = activeSession
-			if (!session) return undefined
-			return {
-				path: session.path,
-				project: session.project,
-				isCurrent: () => activeSession === session,
-				own: (resource) => session.own(resource),
-				runTask: (task) => session.runTask(task),
-			}
-		},
-		lastRequestedProjectPath: () => lastRequestedProjectPath,
-		dispose: lifecycle.dispose,
-	}
 }
 
 let installedRuntime: ProjectRuntime<CloseableProject> | undefined

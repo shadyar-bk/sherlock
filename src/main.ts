@@ -2,19 +2,11 @@ import * as vscode from "vscode"
 import { handleError } from "./utilities/utils.js"
 import { CONFIGURATION } from "./configuration.js"
 import { projectView } from "./utilities/project/project.js"
-import {
-	prepareProject,
-	setActiveProject,
-	setProjectsInWorkspace,
-	state,
-} from "./utilities/state.js"
-import { messagePreview } from "./decorations/messagePreview.js"
-import { ExtractMessage } from "./actions/extractMessage.js"
+import { setProjectsInWorkspace, state } from "./utilities/state.js"
 import { errorView } from "./utilities/errors/errors.js"
 import { messageView, type MessageViewController } from "./utilities/messages/messages.js"
 import { createFileSystemMapper, type FileSystem } from "./utilities/fs/createFileSystemMapper.js"
 import fs from "node:fs/promises"
-import * as nodeFs from "node:fs"
 import { gettingStartedView } from "./utilities/getting-started/gettingStarted.js"
 import { closestInlangProject } from "./utilities/project/closestInlangProject.js"
 import { recommendationBannerView } from "./utilities/recommendation/recommendation.js"
@@ -22,28 +14,17 @@ import { capture } from "./services/telemetry/index.js"
 import packageJson from "../package.json" with { type: "json" }
 import { statusBar } from "./utilities/settings/statusBar.js"
 import fg from "fast-glob"
-import {
-	loadProjectFromDirectory,
-	saveProjectToDirectory,
-	type IdeExtensionConfig,
-	type InlangProject,
-} from "@inlang/sdk"
+import { saveProjectToDirectory, type InlangProject } from "@inlang/sdk"
 import type { ActiveProjectLease } from "./utilities/project/projectRuntime.js"
 import path from "node:path"
-import { linterDiagnostics } from "./diagnostics/linterDiagnostics.js"
-import {
-	createResourceLoadTracker,
-	runWithPluginResourceWrite,
-	setupPluginResourceWatcher,
-} from "./utilities/fs/pluginResourceWatcher.js"
+import { runWithPluginResourceWrite } from "./utilities/fs/pluginResourceWatcher.js"
 import { trackFileSystemMutations } from "./utilities/fs/trackFileSystemMutations.js"
-import { deactivateBeforeClose } from "./utilities/project/projectSession.js"
 import {
-	createProjectRuntime,
 	disposeProjectRuntime,
 	getProjectRuntime,
 	installProjectRuntime,
 } from "./utilities/project/projectRuntime.js"
+import { createProjectSessionEnvironment } from "./utilities/project/projectSessionEnvironment.js"
 //import { initErrorMonitoring } from "./services/error-monitoring/implementation.js"
 
 type JsonObject = Record<string, unknown>
@@ -85,61 +66,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				subscriptions: context.subscriptions,
 			})
 		}
-		const resourceLoadSnapshots = new WeakMap<
-			InlangProject,
-			ReturnType<typeof createResourceLoadTracker>["snapshot"]
-		>()
-		const runtime = createProjectRuntime({
-			loadProject: async (projectPath) => {
-				const loadTracker = createResourceLoadTracker(nodeFs)
-				const project = await loadProjectFromDirectory({ path: projectPath, fs: loadTracker.fs })
-				resourceLoadSnapshots.set(project, loadTracker.snapshot)
-				prepareProject(project)
-				return project
-			},
-			publishActiveSession: (session) =>
-				setActiveProject(session ? { project: session.project, path: session.path } : undefined),
-			prepareSession: async (session, resources) => {
-				const ideExtension = (await session.project.plugins.get()).find(
-					(plugin) => plugin?.meta?.["app.inlang.ideExtension"]
-				)?.meta?.["app.inlang.ideExtension"] as IdeExtensionConfig | undefined
-				const documentSelectors: vscode.DocumentSelector = [
-					{ language: "javascript", pattern: `!${CONFIGURATION.FILES.PROJECT}` },
-					...(ideExtension?.documentSelectors ?? []),
-				]
-				return {
-					activate: () => {
-						resources.push(
-							deactivateBeforeClose(
-								vscode.languages.registerCodeActionsProvider(
-									documentSelectors,
-									new ExtractMessage(),
-									{ providedCodeActionKinds: ExtractMessage.providedCodeActionKinds }
-								)
-							)
-						)
-						messagePreview({ subscriptions: resources, session })
-						void linterDiagnostics({ subscriptions: resources, fs: mappedFs, session })
-						if (messageController) {
-							resources.push(deactivateBeforeClose(messageController.bindProject(session)))
-						}
-					},
-					afterPreviousDisposed: async () => {
-						await setupPluginResourceWatcher({
-							session,
-							loadSnapshot: resourceLoadSnapshots.get(session.project),
-							onError: handleError,
-						})
-						await session
-							.runTask(async () => {
-								await handleInlangErrors(session.project)
-							})
-							.catch(handleError)
-					},
-				}
-			},
-			onDidReplaceSession: notifyProjectChanged,
-			onError: (error) => handleError(error),
+		const runtime = createProjectSessionEnvironment({
+			fileSystem: mappedFs,
+			messageView: messageController,
 		})
 		installProjectRuntime(runtime)
 		context.subscriptions.push({ dispose: () => void disposeProjectRuntime() })
@@ -218,19 +147,8 @@ async function registerGlobalViews(args: {
 	await statusBar(args)
 }
 
-function notifyProjectChanged() {
-	CONFIGURATION.EVENTS.ON_DID_PROJECT_CHANGE.fire(undefined)
-}
-
 export async function deactivate() {
 	await disposeProjectRuntime()
-}
-
-async function handleInlangErrors(project: Awaited<ReturnType<typeof loadProjectFromDirectory>>) {
-	const inlangErrors = (await project.errors.get()) || []
-	if (inlangErrors.length > 0) {
-		console.error("Extension errors (Sherlock):", inlangErrors)
-	}
 }
 
 export async function discoverProjectsInWorkspace(args: {
