@@ -1,15 +1,22 @@
 import path from "node:path"
 import crypto from "node:crypto"
 import type fs from "node:fs"
+import * as nodeFs from "node:fs"
+import nodeFsPromises from "node:fs/promises"
 import * as vscode from "vscode"
-import type { InlangProject } from "@inlang/sdk"
-import { deactivateBeforeClose, type ProjectSession } from "../project/projectSession.js"
-import type { FileSystemMutation } from "./trackFileSystemMutations.js"
+import { loadProjectFromDirectory, saveProjectToDirectory, type InlangProject } from "@inlang/sdk"
+import { deactivateBeforeClose, type ProjectSession } from "./projectSession.js"
+import { createFileSystemMapper, type FileSystem } from "../fs/createFileSystemMapper.js"
 
 const DEBOUNCE_MS = 150
 const MISSING_RESOURCE = Symbol("missing resource")
+type JsonObject = Record<string, unknown>
+type DottedMessageKeySnapshot = {
+	messageFilePath: string
+	keys: Map<string, { hadNestedPath: boolean }>
+}
 
-export type ResourceLoadSnapshot = ReadonlyMap<string, string | typeof MISSING_RESOURCE>
+type ResourceLoadSnapshot = ReadonlyMap<string, string | typeof MISSING_RESOURCE>
 
 type ResourceWriteState = {
 	activeWrites: number
@@ -22,9 +29,16 @@ type ResourceWriteState = {
 	releaseWrite?: () => void
 }
 
-const resourceWrites = new WeakMap<object, ResourceWriteState>()
+type FileSystemMutation =
+	| {
+			type: "write"
+			path: string
+			data: Parameters<FileSystem["writeFile"]>[1]
+			options: Parameters<FileSystem["writeFile"]>[2]
+	  }
+	| { type: "delete"; path: string; recursive: boolean }
 
-export type PluginResourceDescriptor = {
+type PluginResourceDescriptor = {
 	pluginKey: string
 	path: string
 	absolutePath: string
@@ -40,7 +54,7 @@ function reportError(onError: ((error: unknown) => void) | undefined, error: unk
 	}
 }
 
-export async function discoverPluginResourceDescriptors(args: {
+async function discoverPluginResourceDescriptors(args: {
 	session: ProjectSession<InlangProject>
 	onError?(error: unknown): void
 }): Promise<PluginResourceDescriptor[]> {
@@ -117,7 +131,7 @@ function isPathWithin(parentPath: string, filePath: string) {
 	)
 }
 
-export function createResourceLoadTracker(fileSystem: typeof fs): {
+function observeResourceLoads(fileSystem: typeof fs): {
 	fs: typeof fs
 	snapshot: ResourceLoadSnapshot
 } {
@@ -150,7 +164,7 @@ export function createResourceLoadTracker(fileSystem: typeof fs): {
 	return { fs: trackedFileSystem, snapshot }
 }
 
-function resourceWriteState(project: object) {
+function resourceWriteState(project: object, resourceWrites: WeakMap<object, ResourceWriteState>) {
 	let state = resourceWrites.get(project)
 	if (!state) {
 		state = {
@@ -166,11 +180,12 @@ function resourceWriteState(project: object) {
 	return state
 }
 
-export async function runWithPluginResourceWrite<T>(
+async function runWithResourceWrite<T>(
 	project: object,
+	writeState: (project: object) => ResourceWriteState,
 	write: (recordResourceWrite: (mutation: FileSystemMutation) => void) => Promise<T>
 ) {
-	const state = resourceWriteState(project)
+	const state = writeState(project)
 	const queuedWrite = state.writeQueue.then(async () => {
 		state.revision += 1
 		state.expectedFingerprints.clear()
@@ -221,9 +236,10 @@ export async function runWithPluginResourceWrite<T>(
 	return queuedWrite
 }
 
-export async function setupPluginResourceWatcher(args: {
+async function watchProjectResources(args: {
 	session: ProjectSession<InlangProject>
 	loadSnapshot?: ResourceLoadSnapshot
+	writeState(project: object): ResourceWriteState
 	onError?(error: unknown): void
 }): Promise<PluginResourceDescriptor[]> {
 	const discovery = await args.session.runTask(() =>
@@ -261,7 +277,7 @@ export async function setupPluginResourceWatcher(args: {
 		event: "create" | "change" | "delete"
 	): Promise<void> => {
 		if (!acceptingEvents) return
-		const writeState = resourceWriteState(args.session.project)
+		const writeState = args.writeState(args.session.project)
 		const writeRevision = writeState.revision
 		if (writeState.activeWrites > 0) {
 			await writeState.release
@@ -324,7 +340,7 @@ export async function setupPluginResourceWatcher(args: {
 		void execution.finally(() => running.delete(execution)).catch(() => undefined)
 	}
 
-	const writeState = resourceWriteState(args.session.project)
+	const writeState = args.writeState(args.session.project)
 	const refreshAfterWrite = async () => {
 		for (const [filePath, expectedFingerprint] of writeState.expectedFingerprints) {
 			if (!fingerprints.has(filePath)) continue
@@ -448,4 +464,224 @@ export async function setupPluginResourceWatcher(args: {
 	if (changedDuringInitialization || changedAcrossLoadHandoff) scheduleReload()
 
 	return descriptors
+}
+
+function observeFileSystemMutations(
+	fileSystem: FileSystem,
+	onDidMutate: (mutation: FileSystemMutation) => Promise<void> | void
+): FileSystem {
+	return new Proxy(fileSystem, {
+		get(target, property, receiver) {
+			if (property === "writeFile") {
+				return async (...args: Parameters<FileSystem["writeFile"]>) => {
+					await Reflect.apply(target.writeFile, target, args)
+					await onDidMutate({
+						type: "write",
+						path: String(args[0]),
+						data: args[1],
+						options: args[2],
+					})
+				}
+			}
+			if (property === "rmdir" || property === "unlink") {
+				return async (...args: unknown[]) => {
+					await Reflect.apply(target[property], target, args)
+					await onDidMutate({ type: "delete", path: String(args[0]), recursive: false })
+				}
+			}
+			if (property === "copyFile") {
+				return async (...args: Parameters<FileSystem["copyFile"]>) => {
+					const copiedData = await target.readFile(args[0])
+					await Reflect.apply(target.copyFile, target, args)
+					await onDidMutate({
+						type: "write",
+						path: String(args[1]),
+						data: copiedData,
+						options: undefined,
+					})
+				}
+			}
+			if (property === "rm") {
+				return async (...args: Parameters<FileSystem["rm"]>) => {
+					await Reflect.apply(target.rm, target, args)
+					await onDidMutate({
+						type: "delete",
+						path: String(args[0]),
+						recursive: args[1]?.recursive === true,
+					})
+				}
+			}
+			return Reflect.get(target, property, receiver)
+		},
+	})
+}
+
+export type ProjectResourceSynchronization = {
+	load(path: string): Promise<InlangProject>
+	watch(
+		session: ProjectSession<InlangProject>,
+		options?: { onError?(error: unknown): void }
+	): Promise<void>
+	save(project: InlangProject, path: string): Promise<void>
+}
+
+export function createProjectResourceSynchronization(): ProjectResourceSynchronization {
+	const resourceLoadSnapshots = new WeakMap<InlangProject, ResourceLoadSnapshot>()
+	const resourceWrites = new WeakMap<object, ResourceWriteState>()
+	const writeState = (project: object) => resourceWriteState(project, resourceWrites)
+
+	return {
+		async load(projectPath) {
+			const loadTracker = observeResourceLoads(nodeFs)
+			const project = await loadProjectFromDirectory({ path: projectPath, fs: loadTracker.fs })
+			resourceLoadSnapshots.set(project, loadTracker.snapshot)
+			return project
+		},
+		async watch(session, options) {
+			await watchProjectResources({
+				session,
+				loadSnapshot: resourceLoadSnapshots.get(session.project),
+				writeState,
+				onError: options?.onError,
+			})
+		},
+		async save(project, projectPath) {
+			await runWithResourceWrite(project, writeState, async (recordResourceWrite) => {
+				const dottedKeySnapshots = await snapshotExplicitDottedMessageKeys(project, projectPath)
+				const trackedFileSystem = observeFileSystemMutations(nodeFsPromises, recordResourceWrite)
+				await saveProjectToDirectory({
+					fs: createFileSystemMapper(projectPath, trackedFileSystem),
+					project,
+					path: projectPath,
+				})
+				await restoreExplicitDottedMessageKeys(dottedKeySnapshots, trackedFileSystem)
+			})
+		},
+	}
+}
+
+export const projectResourceSynchronization = createProjectResourceSynchronization()
+
+export function saveProjectResources(project: InlangProject, path: string) {
+	return projectResourceSynchronization.save(project, path)
+}
+
+async function snapshotExplicitDottedMessageKeys(
+	project: InlangProject,
+	projectPath: string
+): Promise<DottedMessageKeySnapshot[]> {
+	const settings = await project.settings.get()
+	const pathPattern = getJsonPathPattern(settings)
+	if (!pathPattern) return []
+
+	const snapshots: DottedMessageKeySnapshot[] = []
+	for (const locale of settings.locales) {
+		const messageFilePath = getMessageFilePath(projectPath, pathPattern, locale)
+		const json = await readJsonObject(messageFilePath).catch(() => undefined)
+		if (!json) continue
+
+		const keys = new Map<string, { hadNestedPath: boolean }>()
+		for (const key of Object.keys(json)) {
+			if (key === "$schema" || !key.includes(".")) continue
+			keys.set(key, { hadNestedPath: getNestedPath(json, key.split(".")) !== undefined })
+		}
+		if (keys.size > 0) snapshots.push({ messageFilePath, keys })
+	}
+	return snapshots
+}
+
+async function restoreExplicitDottedMessageKeys(
+	snapshots: DottedMessageKeySnapshot[],
+	fileSystem: FileSystem
+) {
+	for (const snapshot of snapshots) {
+		const originalContent = await fileSystem
+			.readFile(snapshot.messageFilePath, "utf8")
+			.catch(() => undefined)
+		if (originalContent === undefined) continue
+
+		const json = parseJsonObject(originalContent)
+		if (!json) continue
+
+		let changed = false
+		for (const [key, savedKey] of snapshot.keys) {
+			const exportedValue = getNestedPath(json, key.split("."))
+			if (exportedValue === undefined) continue
+			if (json[key] !== exportedValue) {
+				json[key] = exportedValue
+				changed = true
+			}
+			if (!savedKey.hadNestedPath && deleteNestedPath(json, key.split("."))) changed = true
+		}
+		if (!changed) continue
+
+		await fileSystem.writeFile(
+			snapshot.messageFilePath,
+			`${JSON.stringify(json, undefined, detectJsonIndent(originalContent))}${
+				originalContent.endsWith("\n") ? "\n" : ""
+			}`
+		)
+	}
+}
+
+function getJsonPathPattern(settings: Awaited<ReturnType<InlangProject["settings"]["get"]>>) {
+	const pathPattern =
+		(settings as any)["plugin.inlang.json"]?.pathPattern ??
+		(settings as any)["plugin.inlang.messageFormat"]?.pathPattern
+	return typeof pathPattern === "string" ? pathPattern : undefined
+}
+
+function getMessageFilePath(projectPath: string, pathPattern: string, locale: string) {
+	return path.resolve(
+		path.dirname(projectPath),
+		pathPattern.replace("{languageTag}", locale).replace("{locale}", locale)
+	)
+}
+
+async function readJsonObject(filePath: string) {
+	return parseJsonObject(await nodeFsPromises.readFile(filePath, "utf8"))
+}
+
+function parseJsonObject(content: string | Uint8Array) {
+	const json = JSON.parse(content.toString())
+	return isJsonObject(json) ? json : undefined
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+	return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function getNestedPath(json: JsonObject, pathParts: string[]) {
+	let current: unknown = json
+	for (const part of pathParts) {
+		if (!isJsonObject(current) || !(part in current)) return undefined
+		current = current[part]
+	}
+	return current
+}
+
+function deleteNestedPath(json: JsonObject, pathParts: string[]) {
+	if (pathParts.length < 2) return false
+	const parents: Array<{ object: JsonObject; key: string }> = []
+	let current: JsonObject = json
+	for (const part of pathParts.slice(0, -1)) {
+		const next = current[part]
+		if (!isJsonObject(next)) return false
+		parents.push({ object: current, key: part })
+		current = next
+	}
+	const leafKey = pathParts[pathParts.length - 1]
+	if (leafKey === undefined || !(leafKey in current)) return false
+	delete current[leafKey]
+	for (let index = parents.length - 1; index >= 0; index -= 1) {
+		const { object, key } = parents[index]!
+		const child = object[key]
+		if (!isJsonObject(child) || Object.keys(child).length > 0) break
+		delete object[key]
+	}
+	return true
+}
+
+function detectJsonIndent(content: string | Uint8Array) {
+	return content.toString().match(/\n(\s+)"/)?.[1] ?? "\t"
 }

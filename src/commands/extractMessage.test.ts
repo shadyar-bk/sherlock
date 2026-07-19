@@ -97,6 +97,10 @@ vi.mock("../utilities/project/projectRuntime.js", () => ({
 	}),
 }))
 
+vi.mock("../utilities/project/projectResourceSynchronization.js", () => ({
+	saveProjectResources: vi.fn(async () => undefined),
+}))
+
 describe("extractMessageCommand", () => {
 	beforeEach(() => {
 		vi.clearAllMocks()

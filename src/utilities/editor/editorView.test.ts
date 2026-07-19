@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { editorView } from "./editorView.js"
-import { saveProject, saveProjectData } from "../../main.js"
+import { saveProject } from "../../main.js"
+import { saveProjectResources } from "../project/projectResourceSynchronization.js"
 import { handleUpdateBundle } from "./helper/handleBundleUpdate.js"
 import { createMessage } from "./helper/createMessage.js"
 import { selectBundleById } from "../project/selectBundleById.js"
@@ -50,7 +51,9 @@ vi.mock("../project/selectBundleById.js", () => ({
 }))
 vi.mock("../../main.js", () => ({
 	saveProject: vi.fn(async () => "saved"),
-	saveProjectData: vi.fn(async () => undefined),
+}))
+vi.mock("../project/projectResourceSynchronization.js", () => ({
+	saveProjectResources: vi.fn(async () => undefined),
 }))
 
 describe("editorView", () => {
@@ -74,7 +77,7 @@ describe("editorView", () => {
 
 		await view.dispose({ persist: true })
 
-		expect(saveProjectData).not.toHaveBeenCalled()
+		expect(saveProjectResources).not.toHaveBeenCalled()
 	})
 
 	it("persists a dirty focused edit during extension shutdown", async () => {
@@ -108,7 +111,7 @@ describe("editorView", () => {
 
 		await view.dispose({ persist: true })
 
-		expect(saveProjectData).toHaveBeenCalledWith(project, "/workspace/project.inlang")
+		expect(saveProjectResources).toHaveBeenCalledWith(project, "/workspace/project.inlang")
 	})
 
 	it("retries a failed blur save during extension shutdown", async () => {
@@ -140,7 +143,7 @@ describe("editorView", () => {
 
 		await view.dispose({ persist: true })
 
-		expect(saveProjectData).toHaveBeenCalledWith(project, "/workspace/project.inlang")
+		expect(saveProjectResources).toHaveBeenCalledWith(project, "/workspace/project.inlang")
 	})
 
 	it("does not let an older save acknowledge a newer edit", async () => {
@@ -183,7 +186,7 @@ describe("editorView", () => {
 
 		await view.dispose({ persist: true })
 
-		expect(saveProjectData).toHaveBeenCalledWith(project, "/workspace/project.inlang")
+		expect(saveProjectResources).toHaveBeenCalledWith(project, "/workspace/project.inlang")
 	})
 
 	it("waits for a matching structural update before acknowledging its revision", async () => {

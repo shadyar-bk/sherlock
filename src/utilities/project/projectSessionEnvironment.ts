@@ -1,5 +1,4 @@
-import { loadProjectFromDirectory, type IdeExtensionConfig, type InlangProject } from "@inlang/sdk"
-import * as nodeFs from "node:fs"
+import { type IdeExtensionConfig, type InlangProject } from "@inlang/sdk"
 import * as vscode from "vscode"
 import { ExtractMessage } from "../../actions/extractMessage.js"
 import { CONFIGURATION } from "../../configuration.js"
@@ -7,13 +6,10 @@ import { messagePreview } from "../../decorations/messagePreview.js"
 import { linterDiagnostics } from "../../diagnostics/linterDiagnostics.js"
 import type { MessageViewController } from "../messages/messages.js"
 import type { FileSystem } from "../fs/createFileSystemMapper.js"
-import {
-	createResourceLoadTracker,
-	setupPluginResourceWatcher,
-} from "../fs/pluginResourceWatcher.js"
 import { prepareProject, setActiveProject } from "../state.js"
 import { handleError } from "../utils.js"
 import type { ProjectRuntime } from "./projectRuntime.js"
+import { projectResourceSynchronization } from "./projectResourceSynchronization.js"
 import {
 	createProjectSessionLifecycle,
 	deactivateBeforeClose,
@@ -29,16 +25,9 @@ export type ProjectSessionEnvironmentArgs = {
 export function createProjectSessionEnvironment(
 	args: ProjectSessionEnvironmentArgs
 ): ProjectRuntime<InlangProject> {
-	const resourceLoadSnapshots = new WeakMap<
-		InlangProject,
-		ReturnType<typeof createResourceLoadTracker>["snapshot"]
-	>()
-
 	return createEnvironmentRuntime({
 		loadProject: async (projectPath) => {
-			const loadTracker = createResourceLoadTracker(nodeFs)
-			const project = await loadProjectFromDirectory({ path: projectPath, fs: loadTracker.fs })
-			resourceLoadSnapshots.set(project, loadTracker.snapshot)
+			const project = await projectResourceSynchronization.load(projectPath)
 			prepareProject(project)
 			return project
 		},
@@ -71,11 +60,7 @@ export function createProjectSessionEnvironment(
 					}
 				},
 				afterPreviousDisposed: async () => {
-					await setupPluginResourceWatcher({
-						session,
-						loadSnapshot: resourceLoadSnapshots.get(session.project),
-						onError: handleError,
-					})
+					await projectResourceSynchronization.watch(session, { onError: handleError })
 					await session
 						.runTask(async () => {
 							await handleInlangErrors(session.project)

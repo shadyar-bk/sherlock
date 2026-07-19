@@ -1,17 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import * as vscode from "vscode"
 import fg from "fast-glob"
-import {
-	activate,
-	deactivate,
-	discoverProjectsInWorkspace,
-	saveProject,
-	saveProjectData,
-} from "./main.js"
+import { activate, deactivate, discoverProjectsInWorkspace, saveProject } from "./main.js"
 import { state } from "./utilities/state.js"
 import { handleError } from "./utilities/utils.js"
 import { gettingStartedView } from "./utilities/getting-started/gettingStarted.js"
-import { saveProjectToDirectory } from "@inlang/sdk"
 import { closestInlangProject } from "./utilities/project/closestInlangProject.js"
 import { projectView } from "./utilities/project/project.js"
 import { messageView } from "./utilities/messages/messages.js"
@@ -19,8 +12,8 @@ import { errorView } from "./utilities/errors/errors.js"
 import { recommendationBannerView } from "./utilities/recommendation/recommendation.js"
 import { getProjectRuntime } from "./utilities/project/projectRuntime.js"
 import { CONFIGURATION } from "./configuration.js"
-import { runWithPluginResourceWrite } from "./utilities/fs/pluginResourceWatcher.js"
 import { createProjectSessionEnvironment } from "./utilities/project/projectSessionEnvironment.js"
+import { saveProjectResources } from "./utilities/project/projectResourceSynchronization.js"
 
 const createOpenEditorViewCallback = vi.hoisted(() => vi.fn(() => vi.fn()))
 const environment = vi.hoisted(() => ({
@@ -161,12 +154,8 @@ vi.mock("./diagnostics/linterDiagnostics.js", () => ({
 	linterDiagnostics: vi.fn(),
 }))
 
-vi.mock("./utilities/fs/pluginResourceWatcher.js", () => ({
-	runWithPluginResourceWrite: vi.fn(async (_project, write) => write(vi.fn())),
-}))
-
-vi.mock("@inlang/sdk", () => ({
-	saveProjectToDirectory: vi.fn(),
+vi.mock("./utilities/project/projectResourceSynchronization.js", () => ({
+	saveProjectResources: vi.fn(async () => undefined),
 }))
 
 describe("discoverProjectsInWorkspace", () => {
@@ -307,24 +296,6 @@ describe("discoverProjectsInWorkspace", () => {
 		expect(environment.runtime.replaceProject).toHaveBeenCalledTimes(2)
 	})
 
-	it("marks successful project exports as owned resource writes", async () => {
-		const project = {
-			settings: {
-				get: vi.fn(async () => ({ baseLocale: "en", locales: [] })),
-			},
-		}
-
-		await saveProjectData(project as any, "/workspace/project.inlang")
-
-		expect(runWithPluginResourceWrite).toHaveBeenCalledWith(project, expect.any(Function))
-		expect(saveProjectToDirectory).toHaveBeenCalledWith(
-			expect.objectContaining({
-				project,
-				path: "/workspace/project.inlang",
-			})
-		)
-	})
-
 	it("reports whether a leased project export was saved, inactive, or failed", async () => {
 		const project = {
 			settings: { get: vi.fn(async () => ({ baseLocale: "en", locales: [] })) },
@@ -339,6 +310,7 @@ describe("discoverProjectsInWorkspace", () => {
 		}
 
 		await expect(saveProject(completedLease as any)).resolves.toBe("saved")
+		expect(saveProjectResources).toHaveBeenCalledWith(project, "/workspace/project.inlang")
 		await expect(
 			saveProject({
 				...completedLease,
@@ -347,7 +319,7 @@ describe("discoverProjectsInWorkspace", () => {
 		).resolves.toBe("inactive")
 
 		const saveError = new Error("disk full")
-		vi.mocked(saveProjectToDirectory).mockRejectedValueOnce(saveError)
+		vi.mocked(saveProjectResources).mockRejectedValueOnce(saveError)
 		await expect(saveProject(completedLease as any)).resolves.toBe("failed")
 		expect(handleError).toHaveBeenCalledWith(saveError)
 	})
