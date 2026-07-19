@@ -131,10 +131,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		})
 		installProjectRuntime(runtime)
 		context.subscriptions.push({ dispose: () => void disposeProjectRuntime() })
-		await activateInitialProjectSession({ context, workspaceFolder, fs: mappedFs })
 		if (state().projectsInWorkspace.length > 0) {
 			await registerGlobalViews({ context, workspaceFolder, fs: mappedFs })
 		}
+		await activateInitialProjectSession({ context, workspaceFolder, fs: mappedFs })
 
 		capture({
 			event: "IDE-EXTENSION activated",
@@ -171,7 +171,7 @@ async function activateInitialProjectSession(args: {
 
 		vscode.commands.executeCommand("setContext", "sherlock:hasProjectInWorkspace", true)
 		const result = await getProjectRuntime().replaceProject(selectedProjectPath)
-		if (result.status === "failed") throw result.error
+		if (result.status === "failed") handleError(result.error)
 
 		return
 	} else {

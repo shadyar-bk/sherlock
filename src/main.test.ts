@@ -255,4 +255,33 @@ describe("discoverProjectsInWorkspace", () => {
 		await deactivate()
 		expect(reloadedProject.close).toHaveBeenCalledTimes(1)
 	})
+
+	it("keeps global views and the runtime available after the initial project load fails", async () => {
+		const loadError = new Error("plugin failed to load")
+		const recoveredProject = {
+			plugins: { get: vi.fn(async () => []) },
+			settings: { get: vi.fn(async () => ({ locales: [] })) },
+			errors: { get: vi.fn(async () => []) },
+			close: vi.fn(async () => undefined),
+		}
+		const context = { subscriptions: [] } as unknown as vscode.ExtensionContext
+		vi.mocked(fg.async).mockResolvedValueOnce(["/workspace/project.inlang"])
+		vi.mocked(closestInlangProject).mockResolvedValueOnce({
+			projectPath: "/workspace/project.inlang",
+		} as any)
+		vi.mocked(loadProjectFromDirectory)
+			.mockRejectedValueOnce(loadError)
+			.mockResolvedValueOnce(recoveredProject as any)
+
+		await activate(context)
+
+		expect(handleError).toHaveBeenCalledWith(loadError)
+		expect(projectView).toHaveBeenCalledTimes(1)
+		expect(errorView).toHaveBeenCalledTimes(1)
+		expect(getProjectRuntime().lastRequestedProjectPath()).toBe("/workspace/project.inlang")
+		await expect(getProjectRuntime().replaceProject("/workspace/project.inlang")).resolves.toEqual({
+			status: "committed",
+		})
+		expect(state().project).toBe(recoveredProject)
+	})
 })

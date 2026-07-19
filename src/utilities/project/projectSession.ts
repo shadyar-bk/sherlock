@@ -7,17 +7,19 @@ export type ProjectSession<Project extends { close(): Promise<void> }> = {
 
 export type ProjectTaskResult<T> = { status: "completed"; value: T } | { status: "inactive" }
 
+export type ProjectSessionDisposalReason = "replacement" | "shutdown"
+
 export type Disposable = {
-	dispose(): unknown
-	deactivate?(): unknown
+	dispose(reason?: ProjectSessionDisposalReason): unknown
+	deactivate?(reason?: ProjectSessionDisposalReason): unknown
 }
 
 export function deactivateBeforeClose(resource: Disposable): Disposable {
 	let disposal: Promise<void> | undefined
-	const dispose = () => {
+	const dispose = (reason?: ProjectSessionDisposalReason) => {
 		if (!disposal) {
 			try {
-				disposal = Promise.resolve(resource.dispose()).then(() => undefined)
+				disposal = Promise.resolve(resource.dispose(reason)).then(() => undefined)
 			} catch (error) {
 				disposal = Promise.reject(error)
 			}
@@ -55,7 +57,11 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 	onDidReplaceSession?(session: ProjectSession<Project>): Promise<void> | void
 	onError?(error: unknown, phase: "cleanup" | "activation" | "notification"): void
 }) {
-	let activeSession: (ProjectSession<Project> & { dispose(): Promise<void> }) | undefined
+	let activeSession:
+		| (ProjectSession<Project> & {
+				dispose(reason?: ProjectSessionDisposalReason): Promise<void>
+		  })
+		| undefined
 	let disposed = false
 	let disposal: Promise<void> | undefined
 	let generation = 0
@@ -91,7 +97,7 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 					tasks.delete(execution)
 				}
 			},
-			async dispose() {
+			async dispose(reason: ProjectSessionDisposalReason = "replacement") {
 				if (sessionDisposed) return
 				sessionDisposed = true
 				active = false
@@ -102,7 +108,7 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 					try {
 						earlyDisposals.set(
 							resource,
-							Promise.resolve(resource.deactivate()).then(
+							Promise.resolve(resource.deactivate(reason)).then(
 								() => ({ status: "fulfilled", value: undefined }),
 								(reason) => ({ status: "rejected", reason })
 							)
@@ -123,7 +129,7 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 						continue
 					}
 					try {
-						await resource.dispose()
+						await resource.dispose(reason)
 					} catch (error) {
 						errors.push(error)
 					}
@@ -147,7 +153,9 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 	}
 
 	async function disposeCandidate(
-		candidate: ProjectSession<Project> & { dispose(): Promise<void> },
+		candidate: ProjectSession<Project> & {
+			dispose(reason?: ProjectSessionDisposalReason): Promise<void>
+		},
 		message: string
 	): Promise<Extract<ProjectReplacementResult, { status: "failed" }> | undefined> {
 		try {
@@ -244,7 +252,7 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 			}
 			activeSession = candidate
 			try {
-				await previous?.dispose()
+				await previous?.dispose("replacement")
 			} catch (error) {
 				reportError(error, "cleanup")
 			}
@@ -292,7 +300,7 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 					errors.push(error)
 				}
 				try {
-					await previous?.dispose()
+					await previous?.dispose("shutdown")
 				} catch (error) {
 					errors.push(error)
 				}

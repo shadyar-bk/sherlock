@@ -17,9 +17,10 @@ export const reloadProjectCommand = {
 				return "no-workspace" as const
 			}
 
-			const activeProject = getProjectRuntime().activeProject()
-			if (activeProject) {
-				const result = await getProjectRuntime().replaceProject(activeProject.path)
+			const runtime = getProjectRuntime()
+			const projectPath = runtime.activeProject()?.path ?? runtime.lastRequestedProjectPath()
+			if (projectPath) {
+				const result = await runtime.replaceProject(projectPath)
 				if (result.status === "failed") throw result.error
 				if (result.status === "committed") console.log("Project reloaded successfully")
 				return result.status

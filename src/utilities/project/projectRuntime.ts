@@ -20,6 +20,7 @@ export type ActiveProjectLease<Project extends CloseableProject> = {
 export type ProjectRuntime<Project extends CloseableProject> = {
 	replaceProject(path: string): Promise<ProjectReplacementResult>
 	activeProject(): ActiveProjectLease<Project> | undefined
+	lastRequestedProjectPath(): string | undefined
 	dispose(): Promise<void>
 }
 
@@ -34,6 +35,7 @@ export function createProjectRuntime<Project extends CloseableProject>(args: {
 	onError?(error: unknown, phase: "cleanup" | "activation" | "notification"): void
 }): ProjectRuntime<Project> {
 	let activeSession: ProjectSession<Project> | undefined
+	let lastRequestedProjectPath: string | undefined
 	const lifecycle = createProjectSessionLifecycle({
 		loadProject: args.loadProject,
 		prepareSession: args.prepareSession,
@@ -46,7 +48,10 @@ export function createProjectRuntime<Project extends CloseableProject>(args: {
 	})
 
 	return {
-		replaceProject: lifecycle.replaceProject,
+		replaceProject(path) {
+			lastRequestedProjectPath = path
+			return lifecycle.replaceProject(path)
+		},
 		activeProject() {
 			const session = activeSession
 			if (!session) return undefined
@@ -58,6 +63,7 @@ export function createProjectRuntime<Project extends CloseableProject>(args: {
 				runTask: (task) => session.runTask(task),
 			}
 		},
+		lastRequestedProjectPath: () => lastRequestedProjectPath,
 		dispose: lifecycle.dispose,
 	}
 }

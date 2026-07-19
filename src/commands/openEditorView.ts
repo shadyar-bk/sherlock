@@ -19,7 +19,12 @@ export const openEditorViewCommand = {
 		}
 
 		const editor = editorView({ extensionUri, lease, initialBundleId: args.bundleId })
-		if (!lease.own({ dispose: () => editor.dispose({ persist: true }) })) {
+		if (
+			!lease.own({
+				dispose: (reason) =>
+					reason === "shutdown" ? editor.dispose({ persist: true }) : editor.dispose(),
+			})
+		) {
 			await editor.dispose()
 			return
 		}

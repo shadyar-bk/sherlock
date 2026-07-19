@@ -7,9 +7,8 @@ import { getProjectRuntime } from "../utilities/project/projectRuntime.js"
 
 const showPreviewLocalePicker = async (
 	locales: string[],
-	project: InlangProject
+	previewLocale: string | undefined
 ): Promise<string | undefined> => {
-	const previewLocale = await getPreviewLocale(project)
 	const quickPick = vscode.window.createQuickPick()
 	quickPick.placeholder = "Select a language"
 	quickPick.items = locales.map((locale) => ({ label: locale }))
@@ -36,9 +35,18 @@ export const previewLocaleCommand = {
 	callback: async () => {
 		const lease = getProjectRuntime<InlangProject>().activeProject()
 		if (!lease) return
-		const settings = await lease.runTask(() => lease.project.settings.get())
-		if (settings.status !== "completed") return
-		const selectedLocale = await showPreviewLocalePicker(settings.value.locales, lease.project)
+		const preview = await lease.runTask(async () => {
+			const settings = await lease.project.settings.get()
+			return {
+				locales: settings.locales,
+				previewLocale: await getPreviewLocale(lease.project),
+			}
+		})
+		if (preview.status !== "completed") return
+		const selectedLocale = await showPreviewLocalePicker(
+			preview.value.locales,
+			preview.value.previewLocale
+		)
 
 		if (!selectedLocale || !lease.isCurrent()) {
 			return

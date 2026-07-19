@@ -57,8 +57,29 @@ describe("project runtime", () => {
 		await runtime.replaceProject("/second.inlang")
 
 		expect(lease?.isCurrent()).toBe(false)
-		expect(resource.dispose).toHaveBeenCalledTimes(1)
+		expect(resource.dispose).toHaveBeenCalledWith("replacement")
 		expect(lease?.own({ dispose: vi.fn() })).toBe(false)
 		expect(runtime.activeProject()?.project).toBe(second)
+		const activeResource = { dispose: vi.fn() }
+		expect(runtime.activeProject()?.own(activeResource)).toBe(true)
+
+		await runtime.dispose()
+
+		expect(activeResource.dispose).toHaveBeenCalledWith("shutdown")
+	})
+
+	it("remembers a failed initial project path for recovery", async () => {
+		const runtime = createProjectRuntime({
+			loadProject: vi.fn(async () => Promise.reject(new Error("load failed"))),
+			prepareSession,
+			publishActiveSession: vi.fn(),
+		})
+
+		await expect(runtime.replaceProject("/failed.inlang")).resolves.toMatchObject({
+			status: "failed",
+		})
+
+		expect(runtime.activeProject()).toBeUndefined()
+		expect(runtime.lastRequestedProjectPath()).toBe("/failed.inlang")
 	})
 })

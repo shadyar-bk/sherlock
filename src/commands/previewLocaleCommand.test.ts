@@ -124,6 +124,29 @@ describe("previewLocaleCommand", () => {
 		expect(CONFIGURATION.EVENTS.ON_DID_PREVIEW_LOCALE_CHANGE.fire).toHaveBeenCalledTimes(1)
 	})
 
+	it("reads the current preview locale while the project lease owns the query", async () => {
+		let taskIsRunning = false
+		runtimeLease.runTask.mockImplementation(async (task: () => Promise<unknown>) => {
+			taskIsRunning = true
+			try {
+				return { status: "completed", value: await task() }
+			} finally {
+				taskIsRunning = false
+			}
+		})
+		vi.mocked(getPreviewLocale).mockImplementation(async () => {
+			expect(taskIsRunning).toBe(true)
+			return "en"
+		})
+		const quickPick = createQuickPickMock()
+		vi.mocked(vscode.window.createQuickPick).mockReturnValue(quickPick as never)
+
+		await previewLocaleCommand.callback()
+
+		expect(runtimeLease.runTask).toHaveBeenCalledTimes(1)
+		expect(getPreviewLocale).toHaveBeenCalledTimes(1)
+	})
+
 	it("should not update setting if no tag is selected", async () => {
 		const quickPick = createQuickPickMock()
 		vi.mocked(vscode.window.createQuickPick).mockReturnValue(quickPick as never)
