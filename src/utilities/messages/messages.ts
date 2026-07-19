@@ -14,6 +14,7 @@ import {
 import { logger } from "../logger.js"
 import { pollQuery } from "../polling/pollQuery.js"
 import type { Disposable, ProjectSession } from "../project/projectSession.js"
+import { selectBundleById } from "../project/selectBundleById.js"
 
 type MessageProjectSession = ProjectSession<InlangProject>
 
@@ -28,7 +29,8 @@ const getSafeState =
 
 export function createMessageWebviewProvider(args: {
 	workspaceFolder: vscode.WorkspaceFolder
-	context: vscode.ExtensionContext
+	extensionUri: vscode.Uri
+	subscriptions: vscode.Disposable[]
 }): MessageViewController {
 	let bundles: BundleNested[] | undefined
 	let isLoading = true
@@ -216,9 +218,7 @@ export function createMessageWebviewProvider(args: {
 				matchedBundles.map(async (bundle) => {
 					// @ts-ignore TODO: Introduce deprecation message for messageId
 					bundle.bundleId = bundle.bundleId || bundle.messageId
-					const bundleData = await selectBundleNested(activeProject.db)
-						.where("id", "=", bundle.bundleId)
-						.executeTakeFirst()
+					const bundleData = await selectBundleById(activeProject, bundle.bundleId)
 					return bundleData
 				})
 			)
@@ -274,7 +274,7 @@ export function createMessageWebviewProvider(args: {
 			webviewView.webview.html = getHtml({
 				mainContent: rendered.value,
 				webview: webviewView.webview,
-				extensionUri: args.context.extensionUri,
+				extensionUri: args.extensionUri,
 			})
 		}
 	}
@@ -352,7 +352,7 @@ export function createMessageWebviewProvider(args: {
 		},
 	}
 
-	args.context.subscriptions.push(
+	args.subscriptions.push(
 		vscode.window.onDidChangeActiveTextEditor(debounceUpdate),
 		vscode.workspace.onDidChangeTextDocument((event) => {
 			if (
@@ -669,14 +669,14 @@ export async function getTranslationsTableHtml(args: {
 
 export async function messageView(args: {
 	workspaceFolder: vscode.WorkspaceFolder
-	context: vscode.ExtensionContext
+	extensionUri: vscode.Uri
+	subscriptions: vscode.Disposable[]
 }) {
 	const provider = createMessageWebviewProvider({
 		workspaceFolder: args.workspaceFolder,
-		context: args.context,
+		extensionUri: args.extensionUri,
+		subscriptions: args.subscriptions,
 	})
-	args.context.subscriptions.push(
-		vscode.window.registerWebviewViewProvider("messageView", provider)
-	)
+	args.subscriptions.push(vscode.window.registerWebviewViewProvider("messageView", provider))
 	return provider
 }

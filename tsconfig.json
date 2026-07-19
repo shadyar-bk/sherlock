@@ -21,7 +21,7 @@
 		"noFallthroughCasesInSwitch": true,
 		"noImplicitOverride": true,
 		"allowUnreachableCode": false,
-		"lib": ["ESNext"],
+		"lib": ["ES2022"],
 		"outDir": "./dist",
 		"resolveJsonModule": true
 	}

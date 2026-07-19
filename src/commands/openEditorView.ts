@@ -1,24 +1,26 @@
-import { commands } from "vscode"
+import { commands, type Uri } from "vscode"
 import { capture } from "../services/telemetry/index.js"
 import { editorView } from "../utilities/editor/editorView.js"
-import * as vscode from "vscode"
 import type { InlangProject } from "@inlang/sdk"
-import { getProjectRuntime } from "../utilities/project/projectRuntime.js"
+import { getProjectRuntime, type ActiveProjectLease } from "../utilities/project/projectRuntime.js"
 
-export const openEditorViewCommand = {
-	command: "sherlock.openEditorView",
-	title: "Sherlock: Open Editor View",
-	register: commands.registerCommand,
-	callback: async function (args: { bundleId: string }) {
-		const extensionUri = vscode.extensions.getExtension("inlang.vs-code-extension")?.extensionUri
-		const lease = getProjectRuntime<InlangProject>().activeProject()
+export function createOpenEditorViewCallback(args: {
+	extensionUri: Uri
+	activeProject?: () => ActiveProjectLease<InlangProject> | undefined
+}) {
+	const activeProject =
+		args.activeProject ?? (() => getProjectRuntime<InlangProject>().activeProject())
 
-		if (!extensionUri || !lease) {
-			console.error("Extension environment or active project is not available.")
-			return
-		}
+	return async function (commandArgs: { bundleId: string }) {
+		const lease = activeProject()
 
-		const editor = editorView({ extensionUri, lease, initialBundleId: args.bundleId })
+		if (!lease) return
+
+		const editor = editorView({
+			extensionUri: args.extensionUri,
+			lease,
+			initialBundleId: commandArgs.bundleId,
+		})
 		if (
 			!lease.own({
 				dispose: (reason) =>
@@ -32,8 +34,15 @@ export const openEditorViewCommand = {
 
 		capture({
 			event: "IDE-EXTENSION Editor View opened",
-			properties: { bundleId: args.bundleId },
+			properties: { bundleId: commandArgs.bundleId },
 		})
 		return undefined
-	},
+	}
+}
+
+export const openEditorViewCommand = {
+	command: "sherlock.openEditorView",
+	title: "Sherlock: Open Editor View",
+	register: commands.registerCommand,
+	createCallback: createOpenEditorViewCallback,
 }

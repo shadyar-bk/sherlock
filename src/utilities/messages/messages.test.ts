@@ -10,8 +10,10 @@ import {
 	getTranslationsTableHtml,
 } from "./messages.js"
 import { CONFIGURATION } from "../../configuration.js"
+import { selectBundleById } from "../project/selectBundleById.js"
 
 const pollSubscribe = vi.hoisted(() => vi.fn())
+const selectBundleNested = vi.hoisted(() => vi.fn())
 
 const completedTask = async <T>(task: () => Promise<T>) => ({
 	status: "completed" as const,
@@ -72,9 +74,21 @@ vi.mock("../polling/pollQuery.js", () => ({
 	pollQuery: vi.fn(() => ({ subscribe: pollSubscribe })),
 }))
 
+vi.mock("@inlang/sdk", () => ({
+	selectBundleNested,
+}))
+
+vi.mock("../project/selectBundleById.js", () => ({
+	selectBundleById: vi.fn(),
+}))
+
 describe("Message Webview Provider Tests", () => {
 	beforeEach(() => {
 		vi.clearAllMocks()
+		selectBundleNested.mockReturnValue({
+			execute: vi.fn(async () => []),
+			where: vi.fn(() => ({ executeTakeFirst: vi.fn(async () => undefined) })),
+		})
 	})
 
 	it("should create HTML for a message", async () => {
@@ -261,6 +275,58 @@ describe("Message Webview Provider Tests", () => {
 		expect(html).toContain("Loading messages...")
 	})
 
+	it("selects an exact highlighted bundle through the shared exact-ID operation", async () => {
+		const bundle = { id: "welcome", declarations: [], messages: [] }
+		vi.mocked(selectBundleById).mockResolvedValue(bundle as never)
+		const project = {
+			db: {},
+			plugins: {
+				get: vi.fn(async () => [
+					{
+						meta: {
+							"app.inlang.ideExtension": {
+								messageReferenceMatchers: [vi.fn(async () => [{ bundleId: "welcome" }])],
+							},
+						},
+					},
+				]),
+			},
+			settings: { get: vi.fn(async () => ({ locales: [] })) },
+		}
+		const subscriptions: vscode.Disposable[] = []
+		const provider = createMessageWebviewProvider({
+			workspaceFolder: { uri: { fsPath: "/workspace" } } as vscode.WorkspaceFolder,
+			extensionUri: { fsPath: "/extension" } as vscode.Uri,
+			subscriptions,
+		})
+		const binding = provider.bindProject({
+			path: "/workspace/project.inlang",
+			project,
+			runTask: completedTask,
+		} as any)
+		let disposeView!: () => void
+
+		provider.resolveWebviewView(
+			{
+				onDidDispose: vi.fn((callback) => (disposeView = callback)),
+				webview: {
+					onDidReceiveMessage: vi.fn(),
+					asWebviewUri: vi.fn((uri) => uri),
+					cspSource: "test-csp",
+					options: {},
+					html: "",
+				},
+			} as unknown as vscode.WebviewView,
+			{} as never,
+			{} as never
+		)
+
+		await vi.waitFor(() => expect(selectBundleById).toHaveBeenCalledWith(project, "welcome"))
+		disposeView()
+		await binding.dispose()
+		for (const subscription of subscriptions) subscription?.dispose()
+	})
+
 	it("replaces polling when reload creates a new project at the same path", async () => {
 		const firstSubscription = { unsubscribe: vi.fn(async () => undefined) }
 		const secondSubscription = { unsubscribe: vi.fn(async () => undefined) }
@@ -269,10 +335,8 @@ describe("Message Webview Provider Tests", () => {
 		const secondProject = { db: {}, plugins: { get: vi.fn(async () => []) } }
 		const provider = createMessageWebviewProvider({
 			workspaceFolder: { uri: { fsPath: "/workspace" } } as vscode.WorkspaceFolder,
-			context: {
-				subscriptions: [],
-				extensionUri: { fsPath: "/extension" },
-			} as unknown as vscode.ExtensionContext,
+			extensionUri: { fsPath: "/extension" } as vscode.Uri,
+			subscriptions: [],
 		})
 		const firstBinding = provider.bindProject({
 			path: "/workspace/project.inlang",
@@ -316,10 +380,8 @@ describe("Message Webview Provider Tests", () => {
 		pollSubscribe.mockReturnValueOnce(firstSubscription).mockReturnValueOnce(secondSubscription)
 		const provider = createMessageWebviewProvider({
 			workspaceFolder: { uri: { fsPath: "/workspace" } } as vscode.WorkspaceFolder,
-			context: {
-				subscriptions: [],
-				extensionUri: { fsPath: "/extension" },
-			} as unknown as vscode.ExtensionContext,
+			extensionUri: { fsPath: "/extension" } as vscode.Uri,
+			subscriptions: [],
 		})
 		provider.bindProject({
 			path: "/workspace/project.inlang",
@@ -360,10 +422,8 @@ describe("Message Webview Provider Tests", () => {
 		pollSubscribe.mockReturnValueOnce(subscription)
 		const provider = createMessageWebviewProvider({
 			workspaceFolder: { uri: { fsPath: "/workspace" } } as vscode.WorkspaceFolder,
-			context: {
-				subscriptions: [],
-				extensionUri: { fsPath: "/extension" },
-			} as unknown as vscode.ExtensionContext,
+			extensionUri: { fsPath: "/extension" } as vscode.Uri,
+			subscriptions: [],
 		})
 		provider.bindProject({
 			path: "/workspace/project.inlang",
@@ -409,10 +469,8 @@ describe("Message Webview Provider Tests", () => {
 		pollSubscribe.mockReturnValueOnce(subscription)
 		const provider = createMessageWebviewProvider({
 			workspaceFolder: { uri: { fsPath: "/workspace" } } as vscode.WorkspaceFolder,
-			context: {
-				subscriptions: [],
-				extensionUri: { fsPath: "/extension" },
-			} as unknown as vscode.ExtensionContext,
+			extensionUri: { fsPath: "/extension" } as vscode.Uri,
+			subscriptions: [],
 		})
 		provider.bindProject({
 			path: "/workspace/project.inlang",

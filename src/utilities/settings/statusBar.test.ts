@@ -65,7 +65,9 @@ describe("statusBar", () => {
 
 	afterEach(() => {
 		for (const context of activeContexts.splice(0)) {
-			for (const subscription of context.subscriptions.toReversed()) subscription.dispose()
+			for (let index = context.subscriptions.length - 1; index >= 0; index -= 1) {
+				context.subscriptions[index]!.dispose()
+			}
 		}
 	})
 

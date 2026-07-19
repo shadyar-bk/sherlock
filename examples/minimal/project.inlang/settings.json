@@ -3,7 +3,7 @@
 	"baseLocale": "en",
 	"locales": ["en", "de"],
 	"modules": [
-		"https://cdn.jsdelivr.net/npm/@inlang/plugin-json@4/dist/index.js",
+		"https://cdn.jsdelivr.net/npm/@inlang/plugin-json@5.1.57/dist/index.js",
 		"https://cdn.jsdelivr.net/npm/@inlang/plugin-t-function-matcher@2/dist/index.js"
 	],
 	"plugin.inlang.json": {

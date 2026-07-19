@@ -3,11 +3,17 @@ export type ProjectSession<Project extends { close(): Promise<void> }> = {
 	readonly project: Project
 	own(resource: Disposable): boolean
 	runTask<T>(task: () => Promise<T>): Promise<ProjectTaskResult<T>>
+	requestReconciliation(): ProjectReconciliationRequestResult
 }
 
 export type ProjectTaskResult<T> = { status: "completed"; value: T } | { status: "inactive" }
 
 export type ProjectSessionDisposalReason = "replacement" | "shutdown"
+
+export type ProjectReconciliationRequestResult =
+	| { status: "scheduled" }
+	| { status: "deferred" }
+	| { status: "superseded" }
 
 export type Disposable = {
 	dispose(reason?: ProjectSessionDisposalReason): unknown
@@ -42,6 +48,10 @@ export type ProjectReplacementResult =
 const COMMITTED = { status: "committed" } as const
 const SUPERSEDED = { status: "superseded" } as const
 
+// Keep extension reload and shutdown responsive without closing a project that
+// may still be used by its already-running work.
+const DEFAULT_CLEANUP_GRACE_MS = 1_000
+
 export type PreparedProjectSession = {
 	activate(): void
 	afterPreviousDisposed?(): Promise<void> | void
@@ -55,25 +65,69 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 	): Promise<PreparedProjectSession>
 	setActiveSession(session: ProjectSession<Project> | undefined): void
 	onDidReplaceSession?(session: ProjectSession<Project>): Promise<void> | void
-	onError?(error: unknown, phase: "cleanup" | "activation" | "notification"): void
+	onError?(
+		error: unknown,
+		phase: "cleanup" | "activation" | "notification" | "reconciliation"
+	): void
+	cleanupGraceMs?: number
 }) {
-	let activeSession:
-		| (ProjectSession<Project> & {
-				dispose(reason?: ProjectSessionDisposalReason): Promise<void>
-		  })
-		| undefined
+	type ManagedProjectSession = ProjectSession<Project> & {
+		dispose(reason?: ProjectSessionDisposalReason): Promise<void>
+		replayDeferredReconciliation(): void
+	}
+	let activeSession: ManagedProjectSession | undefined
 	let disposed = false
 	let disposal: Promise<void> | undefined
 	let generation = 0
 	let commitQueue = Promise.resolve()
 	const replacements = new Set<Promise<ProjectReplacementResult>>()
+	const pendingUserReplacementGenerations = new Set<number>()
+	const cleanupGraceMs = args.cleanupGraceMs ?? DEFAULT_CLEANUP_GRACE_MS
 
-	function createSession(path: string, project: Project) {
+	async function waitForCleanup(work: Promise<void>) {
+		let timeout: ReturnType<typeof setTimeout> | undefined
+		const graceElapsed = new Promise<false>((resolve) => {
+			timeout = setTimeout(() => resolve(false), cleanupGraceMs)
+		})
+		try {
+			const completed = await Promise.race([work.then(() => true as const), graceElapsed])
+			if (!completed) void work.catch((error) => reportError(error, "cleanup"))
+		} finally {
+			if (timeout) clearTimeout(timeout)
+		}
+	}
+
+	function createSession(path: string, project: Project, sessionGeneration: number) {
 		let resources: Disposable[] = []
 		let sessionDisposed = false
 		let active = false
+		let reconciliationInFlight = false
+		let reconciliationDeferred = false
 		const tasks = new Set<Promise<unknown>>()
-		return {
+		let finalization: Promise<void> | undefined
+		let disposal: Promise<void> | undefined
+		let session: ManagedProjectSession & {
+			resources: Disposable[]
+			activate(): void
+		}
+		const hasNewerUserReplacement = () =>
+			[...pendingUserReplacementGenerations].some(
+				(replacementGeneration) => replacementGeneration > sessionGeneration
+			)
+		const scheduleReconciliation = () => {
+			reconciliationDeferred = false
+			reconciliationInFlight = true
+			void trackReplacement(path, session)
+				.then((result) => {
+					if (result.status === "failed") reportError(result.error, "reconciliation")
+					if (result.status === "superseded") reconciliationDeferred = true
+				})
+				.finally(() => {
+					reconciliationInFlight = false
+					session.replayDeferredReconciliation()
+				})
+		}
+		session = {
 			path,
 			project,
 			resources,
@@ -97,13 +151,37 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 					tasks.delete(execution)
 				}
 			},
-			async dispose(reason: ProjectSessionDisposalReason = "replacement") {
-				if (sessionDisposed) return
+			requestReconciliation() {
+				if (!active || sessionDisposed || activeSession !== session) return SUPERSEDED
+				if (hasNewerUserReplacement()) {
+					reconciliationDeferred = true
+					return { status: "deferred" }
+				}
+				if (reconciliationInFlight) return { status: "scheduled" }
+				scheduleReconciliation()
+				return { status: "scheduled" }
+			},
+			replayDeferredReconciliation() {
+				if (
+					!reconciliationDeferred ||
+					!active ||
+					sessionDisposed ||
+					activeSession !== session ||
+					hasNewerUserReplacement()
+				) {
+					return
+				}
+				if (!reconciliationInFlight) scheduleReconciliation()
+			},
+			dispose(reason: ProjectSessionDisposalReason = "replacement") {
+				if (disposal) return disposal
 				sessionDisposed = true
 				active = false
+				reconciliationDeferred = false
 				const errors: unknown[] = []
 				const earlyDisposals = new Map<Disposable, Promise<PromiseSettledResult<void>>>()
-				for (const resource of resources.toReversed()) {
+				for (let index = resources.length - 1; index >= 0; index -= 1) {
+					const resource = resources[index]!
 					if (!resource.deactivate) continue
 					try {
 						earlyDisposals.set(
@@ -117,34 +195,46 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 						errors.push(error)
 					}
 				}
-				const taskResults = await Promise.allSettled([...tasks])
-				for (const result of taskResults) {
-					if (result.status === "rejected") errors.push(result.reason)
-				}
-				for (const resource of resources.toReversed()) {
-					const earlyDisposal = earlyDisposals.get(resource)
-					if (earlyDisposal) {
-						const result = await earlyDisposal
+				finalization = (async () => {
+					const taskResults = await Promise.allSettled([...tasks])
+					for (const result of taskResults) {
 						if (result.status === "rejected") errors.push(result.reason)
-						continue
+					}
+					for (let index = resources.length - 1; index >= 0; index -= 1) {
+						const resource = resources[index]!
+						const earlyDisposal = earlyDisposals.get(resource)
+						if (earlyDisposal) {
+							const result = await earlyDisposal
+							if (result.status === "rejected") errors.push(result.reason)
+							continue
+						}
+						try {
+							await resource.dispose(reason)
+						} catch (error) {
+							errors.push(error)
+						}
 					}
 					try {
-						await resource.dispose(reason)
+						await project.close()
 					} catch (error) {
 						errors.push(error)
 					}
-				}
-				try {
-					await project.close()
-				} catch (error) {
-					errors.push(error)
-				}
-				if (errors.length > 0) throw new AggregateError(errors, "Failed to dispose project session")
+					if (errors.length > 0) {
+						throw new AggregateError(errors, "Failed to dispose project session")
+					}
+				})()
+
+				disposal = waitForCleanup(finalization)
+				return disposal
 			},
 		}
+		return session
 	}
 
-	function reportError(error: unknown, phase: "cleanup" | "activation" | "notification") {
+	function reportError(
+		error: unknown,
+		phase: "cleanup" | "activation" | "notification" | "reconciliation"
+	) {
 		try {
 			args.onError?.(error, phase)
 		} catch (reportingError) {
@@ -166,9 +256,8 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 		}
 	}
 
-	async function replaceProject(path: string) {
+	async function replaceProject(path: string, replacementGeneration: number) {
 		if (disposed) return SUPERSEDED
-		const replacementGeneration = ++generation
 		let project: Project
 		try {
 			project = await args.loadProject(path)
@@ -177,7 +266,7 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 			return { status: "failed", error } as const
 		}
 
-		const candidate = createSession(path, project)
+		const candidate = createSession(path, project, replacementGeneration)
 		const commit = commitQueue.then(async () => {
 			if (disposed || replacementGeneration !== generation) {
 				const failure = await disposeCandidate(candidate, "Failed to close superseded project")
@@ -275,10 +364,21 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 		return commit
 	}
 
-	function trackReplacement(path: string) {
-		const replacement = replaceProject(path)
+	function trackReplacement(
+		path: string,
+		reconciliationSource?: NonNullable<typeof activeSession>
+	) {
+		const replacementGeneration = ++generation
+		if (!reconciliationSource) pendingUserReplacementGenerations.add(replacementGeneration)
+		const replacement = replaceProject(path, replacementGeneration)
 		replacements.add(replacement)
-		replacement.finally(() => replacements.delete(replacement)).catch(() => undefined)
+		replacement
+			.finally(() => {
+				replacements.delete(replacement)
+				pendingUserReplacementGenerations.delete(replacementGeneration)
+				if (!reconciliationSource) activeSession?.replayDeferredReconciliation()
+			})
+			.catch(() => undefined)
 		return replacement
 	}
 
@@ -288,26 +388,33 @@ export function createProjectSessionLifecycle<Project extends { close(): Promise
 			if (disposal) return disposal
 			disposed = true
 			generation += 1
-			disposal = (async () => {
+			const previous = activeSession
+			activeSession = undefined
+			const errors: unknown[] = []
+			try {
+				args.setActiveSession(undefined)
+			} catch (error) {
+				errors.push(error)
+			}
+			let previousDisposal: Promise<PromiseSettledResult<void>> | undefined
+			try {
+				previousDisposal = previous?.dispose("shutdown").then(
+					() => ({ status: "fulfilled", value: undefined }),
+					(reason) => ({ status: "rejected", reason })
+				)
+			} catch (error) {
+				errors.push(error)
+			}
+			const finalization = (async () => {
 				await Promise.allSettled([...replacements])
 				await commitQueue
-				const previous = activeSession
-				activeSession = undefined
-				const errors: unknown[] = []
-				try {
-					args.setActiveSession(undefined)
-				} catch (error) {
-					errors.push(error)
-				}
-				try {
-					await previous?.dispose("shutdown")
-				} catch (error) {
-					errors.push(error)
-				}
+				const previousResult = await previousDisposal
+				if (previousResult?.status === "rejected") errors.push(previousResult.reason)
 				if (errors.length > 0) {
 					throw new AggregateError(errors, "Failed to dispose project lifecycle")
 				}
 			})()
+			disposal = waitForCleanup(finalization)
 			return disposal
 		},
 	}

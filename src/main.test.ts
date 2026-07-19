@@ -1,11 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import * as vscode from "vscode"
 import fg from "fast-glob"
-import { activate, deactivate, discoverProjectsInWorkspace } from "./main.js"
+import {
+	activate,
+	deactivate,
+	discoverProjectsInWorkspace,
+	saveProject,
+	saveProjectData,
+} from "./main.js"
 import { state } from "./utilities/state.js"
 import { handleError } from "./utilities/utils.js"
 import { gettingStartedView } from "./utilities/getting-started/gettingStarted.js"
-import { loadProjectFromDirectory } from "@inlang/sdk"
+import { loadProjectFromDirectory, saveProjectToDirectory } from "@inlang/sdk"
 import { closestInlangProject } from "./utilities/project/closestInlangProject.js"
 import { projectView } from "./utilities/project/project.js"
 import { messageView } from "./utilities/messages/messages.js"
@@ -13,7 +19,13 @@ import { errorView } from "./utilities/errors/errors.js"
 import { recommendationBannerView } from "./utilities/recommendation/recommendation.js"
 import { getProjectRuntime } from "./utilities/project/projectRuntime.js"
 import { CONFIGURATION } from "./configuration.js"
-import { setupDirectMessageWatcher } from "./utilities/fs/experimental/directMessageHandler.js"
+import {
+	createResourceLoadTracker,
+	runWithPluginResourceWrite,
+	setupPluginResourceWatcher,
+} from "./utilities/fs/pluginResourceWatcher.js"
+
+const createOpenEditorViewCallback = vi.hoisted(() => vi.fn(() => vi.fn()))
 
 vi.mock("vscode", () => ({
 	version: "1.90.0",
@@ -58,6 +70,11 @@ vi.mock("fast-glob", () => ({
 vi.mock("./configuration.js", () => ({
 	CONFIGURATION: {
 		COMMANDS: {
+			OPEN_EDITOR_VIEW: {
+				command: "sherlock.openEditorView",
+				createCallback: createOpenEditorViewCallback,
+				register: vi.fn(() => ({ dispose: vi.fn() })),
+			},
 			RELOAD: {
 				command: "sherlock.reloadProject",
 				callback: vi.fn(),
@@ -138,8 +155,10 @@ vi.mock("./diagnostics/linterDiagnostics.js", () => ({
 	linterDiagnostics: vi.fn(),
 }))
 
-vi.mock("./utilities/fs/experimental/directMessageHandler.js", () => ({
-	setupDirectMessageWatcher: vi.fn(),
+vi.mock("./utilities/fs/pluginResourceWatcher.js", () => ({
+	createResourceLoadTracker: vi.fn((fs) => ({ fs, snapshot: new Map() })),
+	runWithPluginResourceWrite: vi.fn(async (_project, write) => write(vi.fn())),
+	setupPluginResourceWatcher: vi.fn(),
 }))
 
 vi.mock("@inlang/sdk", () => ({
@@ -209,6 +228,15 @@ describe("discoverProjectsInWorkspace", () => {
 	})
 
 	it("registers global views once while replacing only the project session", async () => {
+		const firstWatcherDispose = vi.fn()
+		const secondWatcherDispose = vi.fn()
+		let watcherInstall = 0
+		vi.mocked(setupPluginResourceWatcher).mockImplementation(async ({ session }) => {
+			session.own({
+				dispose: watcherInstall++ === 0 ? firstWatcherDispose : secondWatcherDispose,
+			})
+			return []
+		})
 		const firstProject = {
 			plugins: { get: vi.fn(async () => []) },
 			settings: { get: vi.fn(async () => ({ locales: [] })) },
@@ -221,7 +249,10 @@ describe("discoverProjectsInWorkspace", () => {
 			errors: { get: vi.fn(async () => []) },
 			close: vi.fn(async () => undefined),
 		}
-		const context = { subscriptions: [] } as unknown as vscode.ExtensionContext
+		const context = {
+			subscriptions: [],
+			extensionUri: { fsPath: "/extension" },
+		} as unknown as vscode.ExtensionContext
 		vi.mocked(fg.async).mockResolvedValueOnce(["/workspace/project.inlang"])
 		vi.mocked(closestInlangProject).mockResolvedValueOnce({
 			projectPath: "/workspace/project.inlang",
@@ -233,26 +264,47 @@ describe("discoverProjectsInWorkspace", () => {
 		await activate(context)
 		await getProjectRuntime().replaceProject("/workspace/project.inlang")
 
+		expect(createResourceLoadTracker).toHaveBeenCalledTimes(2)
 		expect(projectView).toHaveBeenCalledTimes(1)
 		expect(messageView).toHaveBeenCalledTimes(1)
+		expect(messageView).toHaveBeenCalledWith({
+			workspaceFolder,
+			extensionUri: context.extensionUri,
+			subscriptions: context.subscriptions,
+		})
+		expect(createOpenEditorViewCallback).toHaveBeenCalledOnce()
+		expect(createOpenEditorViewCallback).toHaveBeenCalledWith({
+			extensionUri: context.extensionUri,
+		})
 		expect(errorView).toHaveBeenCalledTimes(1)
 		expect(recommendationBannerView).toHaveBeenCalledTimes(1)
 		expect(firstProject.close).toHaveBeenCalledTimes(1)
-		expect(setupDirectMessageWatcher).toHaveBeenCalledTimes(2)
+		expect(setupPluginResourceWatcher).toHaveBeenCalledTimes(2)
+		expect(vi.mocked(setupPluginResourceWatcher).mock.calls[0]?.[0].loadSnapshot).toBe(
+			vi.mocked(createResourceLoadTracker).mock.results[0]?.value.snapshot
+		)
+		expect(vi.mocked(setupPluginResourceWatcher).mock.calls[1]?.[0].loadSnapshot).toBe(
+			vi.mocked(createResourceLoadTracker).mock.results[1]?.value.snapshot
+		)
+		expect(firstWatcherDispose).toHaveBeenCalledOnce()
 		const firstCodeActionProvider = vi.mocked(vscode.languages.registerCodeActionsProvider).mock
 			.results[0]?.value as vscode.Disposable
 		expect(firstCodeActionProvider.dispose).toHaveBeenCalledTimes(1)
 		expect(vi.mocked(firstCodeActionProvider.dispose).mock.invocationCallOrder[0]).toBeLessThan(
 			firstProject.close.mock.invocationCallOrder[0]!
 		)
+		expect(firstWatcherDispose.mock.invocationCallOrder[0]).toBeLessThan(
+			firstProject.close.mock.invocationCallOrder[0]!
+		)
 		expect(firstProject.close.mock.invocationCallOrder[0]).toBeLessThan(
-			vi.mocked(setupDirectMessageWatcher).mock.invocationCallOrder[1]!
+			vi.mocked(setupPluginResourceWatcher).mock.invocationCallOrder[1]!
 		)
 		expect(reloadedProject.close).not.toHaveBeenCalled()
 		expect(CONFIGURATION.EVENTS.ON_DID_PROJECT_CHANGE.fire).toHaveBeenCalledTimes(2)
 
 		await deactivate()
 		await deactivate()
+		expect(secondWatcherDispose).toHaveBeenCalledOnce()
 		expect(reloadedProject.close).toHaveBeenCalledTimes(1)
 	})
 
@@ -283,5 +335,50 @@ describe("discoverProjectsInWorkspace", () => {
 			status: "committed",
 		})
 		expect(state().project).toBe(recoveredProject)
+	})
+
+	it("marks successful project exports as owned resource writes", async () => {
+		const project = {
+			settings: {
+				get: vi.fn(async () => ({ baseLocale: "en", locales: [] })),
+			},
+		}
+
+		await saveProjectData(project as any, "/workspace/project.inlang")
+
+		expect(runWithPluginResourceWrite).toHaveBeenCalledWith(project, expect.any(Function))
+		expect(saveProjectToDirectory).toHaveBeenCalledWith(
+			expect.objectContaining({
+				project,
+				path: "/workspace/project.inlang",
+			})
+		)
+	})
+
+	it("reports whether a leased project export was saved, inactive, or failed", async () => {
+		const project = {
+			settings: { get: vi.fn(async () => ({ baseLocale: "en", locales: [] })) },
+		}
+		const completedLease = {
+			path: "/workspace/project.inlang",
+			project,
+			runTask: async <T>(task: () => Promise<T>) => ({
+				status: "completed" as const,
+				value: await task(),
+			}),
+		}
+
+		await expect(saveProject(completedLease as any)).resolves.toBe("saved")
+		await expect(
+			saveProject({
+				...completedLease,
+				runTask: vi.fn(async () => ({ status: "inactive" as const })),
+			} as any)
+		).resolves.toBe("inactive")
+
+		const saveError = new Error("disk full")
+		vi.mocked(saveProjectToDirectory).mockRejectedValueOnce(saveError)
+		await expect(saveProject(completedLease as any)).resolves.toBe("failed")
+		expect(handleError).toHaveBeenCalledWith(saveError)
 	})
 })

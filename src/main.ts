@@ -31,8 +31,13 @@ import {
 import type { ActiveProjectLease } from "./utilities/project/projectRuntime.js"
 import path from "node:path"
 import { linterDiagnostics } from "./diagnostics/linterDiagnostics.js"
-import { setupDirectMessageWatcher } from "./utilities/fs/experimental/directMessageHandler.js"
-import { deactivateBeforeClose, type Disposable } from "./utilities/project/projectSession.js"
+import {
+	createResourceLoadTracker,
+	runWithPluginResourceWrite,
+	setupPluginResourceWatcher,
+} from "./utilities/fs/pluginResourceWatcher.js"
+import { trackFileSystemMutations } from "./utilities/fs/trackFileSystemMutations.js"
+import { deactivateBeforeClose } from "./utilities/project/projectSession.js"
 import {
 	createProjectRuntime,
 	disposeProjectRuntime,
@@ -40,8 +45,6 @@ import {
 	installProjectRuntime,
 } from "./utilities/project/projectRuntime.js"
 //import { initErrorMonitoring } from "./services/error-monitoring/implementation.js"
-
-const messageFileSnapshots = new Map<string, Set<string>>()
 
 type JsonObject = Record<string, unknown>
 type DottedMessageKeySnapshot = {
@@ -76,11 +79,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		registerGlobalCommands(context)
 		let messageController: MessageViewController | undefined
 		if (state().projectsInWorkspace.length > 0) {
-			messageController = await messageView({ context, workspaceFolder })
+			messageController = await messageView({
+				workspaceFolder,
+				extensionUri: context.extensionUri,
+				subscriptions: context.subscriptions,
+			})
 		}
+		const resourceLoadSnapshots = new WeakMap<
+			InlangProject,
+			ReturnType<typeof createResourceLoadTracker>["snapshot"]
+		>()
 		const runtime = createProjectRuntime({
 			loadProject: async (projectPath) => {
-				const project = await loadProjectFromDirectory({ path: projectPath, fs: nodeFs })
+				const loadTracker = createResourceLoadTracker(nodeFs)
+				const project = await loadProjectFromDirectory({ path: projectPath, fs: loadTracker.fs })
+				resourceLoadSnapshots.set(project, loadTracker.snapshot)
 				prepareProject(project)
 				return project
 			},
@@ -112,14 +125,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						}
 					},
 					afterPreviousDisposed: async () => {
-						await setupDirectMessageWatcher({
-							subscriptions: resources,
-							workspaceFolder,
+						await setupPluginResourceWatcher({
 							session,
+							loadSnapshot: resourceLoadSnapshots.get(session.project),
+							onError: handleError,
 						})
 						await session
 							.runTask(async () => {
-								resources.push(await seedMessageFileSnapshots(session.project, session.path))
 								await handleInlangErrors(session.project)
 							})
 							.catch(handleError)
@@ -181,9 +193,13 @@ async function activateInitialProjectSession(args: {
 
 function registerGlobalCommands(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
-		...Object.values(CONFIGURATION.COMMANDS).map((command) =>
-			command.register(command.command, command.callback as any)
-		),
+		...Object.values(CONFIGURATION.COMMANDS).map((command) => {
+			const callback =
+				"createCallback" in command
+					? command.createCallback({ extensionUri: context.extensionUri })
+					: command.callback
+			return command.register(command.command, callback as any)
+		}),
 		CONFIGURATION.EVENTS.ON_DID_PROJECT_CHANGE.event(() => {
 			CONFIGURATION.EVENTS.ON_DID_PROJECT_TREE_VIEW_CHANGE.fire(undefined)
 			CONFIGURATION.EVENTS.ON_DID_ERROR_TREE_VIEW_CHANGE.fire(undefined)
@@ -248,26 +264,30 @@ export async function saveProject(
 		| ActiveProjectLease<InlangProject>
 		| undefined = getProjectRuntime<InlangProject>().activeProject()
 ) {
-	if (!lease) return
+	if (!lease) return "inactive" as const
 	try {
-		await lease.runTask(() => saveProjectData(lease.project, lease.path))
+		const result = await lease.runTask(() => saveProjectData(lease.project, lease.path))
+		return result.status === "completed" ? ("saved" as const) : ("inactive" as const)
 	} catch (error) {
 		handleError(error)
+		return "failed" as const
 	}
 }
 
 /** Persists a project that is still owned by a session during awaited teardown. */
 export async function saveProjectData(project: InlangProject, projectPath: string) {
-	await removeMessagesDeletedFromJsonFiles(project, projectPath)
-	const dottedKeySnapshots = await snapshotExplicitDottedMessageKeys(project, projectPath)
+	await runWithPluginResourceWrite(project, async (recordResourceWrite) => {
+		const dottedKeySnapshots = await snapshotExplicitDottedMessageKeys(project, projectPath)
+		const trackedFileSystem = trackFileSystemMutations(fs, recordResourceWrite)
 
-	await saveProjectToDirectory({
-		fs: createFileSystemMapper(projectPath, fs),
-		project,
-		path: projectPath,
+		await saveProjectToDirectory({
+			fs: createFileSystemMapper(projectPath, trackedFileSystem),
+			project,
+			path: projectPath,
+		})
+
+		await restoreExplicitDottedMessageKeys(dottedKeySnapshots, trackedFileSystem)
 	})
-
-	await restoreExplicitDottedMessageKeys(dottedKeySnapshots)
 }
 
 async function snapshotExplicitDottedMessageKeys(
@@ -300,9 +320,12 @@ async function snapshotExplicitDottedMessageKeys(
 	return snapshots
 }
 
-async function restoreExplicitDottedMessageKeys(snapshots: DottedMessageKeySnapshot[]) {
+async function restoreExplicitDottedMessageKeys(
+	snapshots: DottedMessageKeySnapshot[],
+	fileSystem: FileSystem
+) {
 	for (const snapshot of snapshots) {
-		const originalContent = await fs
+		const originalContent = await fileSystem
 			.readFile(snapshot.messageFilePath, "utf8")
 			.catch(() => undefined)
 		if (originalContent === undefined) continue
@@ -329,124 +352,11 @@ async function restoreExplicitDottedMessageKeys(snapshots: DottedMessageKeySnaps
 
 		if (!changed) continue
 
-		await fs.writeFile(
-			snapshot.messageFilePath,
-			stringifyJsonObject(json, {
-				indent: detectJsonIndent(originalContent),
-				trailingNewline: originalContent.endsWith("\n"),
-			})
-		)
-		messageFileSnapshots.set(
-			snapshot.messageFilePath,
-			new Set(Object.keys(json).filter((key) => key !== "$schema"))
-		)
-	}
-}
-
-async function removeMessagesDeletedFromJsonFiles(
-	project: InlangProject,
-	selectedProjectPath: string
-) {
-	const settings = await project.settings.get()
-	const baseLocale = settings.baseLocale ?? settings.locales[0]
-	const pathPattern = getJsonPathPattern(settings)
-	if (!pathPattern || !baseLocale) return
-
-	for (const locale of settings.locales) {
-		const messageFilePath = getMessageFilePath(selectedProjectPath, pathPattern, locale)
-		const currentKeys = await readMessageFileKeys(messageFilePath)
-		if (!currentKeys) continue
-
-		const previousKeys = messageFileSnapshots.get(messageFilePath)
-		if (!previousKeys) {
-			messageFileSnapshots.set(messageFilePath, currentKeys)
-			continue
-		}
-
-		const deletedKeys = [...previousKeys].filter((key) => !currentKeys.has(key))
-		for (const key of deletedKeys) {
-			if (locale === baseLocale) {
-				await deleteBundleMessages(key)
-			} else {
-				await deleteLocaleMessage(key, locale)
-			}
-		}
-
-		messageFileSnapshots.set(messageFilePath, currentKeys)
-	}
-
-	async function deleteBundleMessages(bundleId: string) {
-		const messages = await project.db
-			.selectFrom("message")
-			.select("id")
-			.where("bundleId", "=", bundleId)
-			.execute()
-
-		for (const message of messages) {
-			await project.db.deleteFrom("variant").where("messageId", "=", message.id).execute()
-		}
-
-		await project.db.deleteFrom("message").where("bundleId", "=", bundleId).execute()
-		await project.db.deleteFrom("bundle").where("id", "=", bundleId).execute()
-	}
-
-	async function deleteLocaleMessage(bundleId: string, locale: string) {
-		const messages = await project.db
-			.selectFrom("message")
-			.select("id")
-			.where("bundleId", "=", bundleId)
-			.where("locale", "=", locale)
-			.execute()
-
-		for (const message of messages) {
-			await project.db.deleteFrom("variant").where("messageId", "=", message.id).execute()
-		}
-
-		await project.db
-			.deleteFrom("message")
-			.where("bundleId", "=", bundleId)
-			.where("locale", "=", locale)
-			.execute()
-
-		const remainingMessages = await project.db
-			.selectFrom("message")
-			.select("id")
-			.where("bundleId", "=", bundleId)
-			.execute()
-
-		if (remainingMessages.length === 0) {
-			await project.db.deleteFrom("bundle").where("id", "=", bundleId).execute()
-		}
-	}
-}
-
-async function seedMessageFileSnapshots(
-	project: Awaited<ReturnType<typeof loadProjectFromDirectory>>,
-	selectedProjectPath: string
-): Promise<Disposable> {
-	const ownedSnapshots = new Map<string, Set<string>>()
-
-	const settings = await project.settings.get()
-	const pathPattern = getJsonPathPattern(settings)
-	if (!pathPattern) return { dispose: () => undefined }
-
-	for (const locale of settings.locales) {
-		const messageFilePath = getMessageFilePath(selectedProjectPath, pathPattern, locale)
-		const keys = await readMessageFileKeys(messageFilePath)
-		if (keys) {
-			messageFileSnapshots.set(messageFilePath, keys)
-			ownedSnapshots.set(messageFilePath, keys)
-		}
-	}
-
-	return {
-		dispose: () => {
-			for (const [messageFilePath, snapshot] of ownedSnapshots) {
-				if (messageFileSnapshots.get(messageFilePath) === snapshot) {
-					messageFileSnapshots.delete(messageFilePath)
-				}
-			}
-		},
+		const restoredContent = stringifyJsonObject(json, {
+			indent: detectJsonIndent(originalContent),
+			trailingNewline: originalContent.endsWith("\n"),
+		})
+		await fileSystem.writeFile(snapshot.messageFilePath, restoredContent)
 	}
 }
 
@@ -464,16 +374,6 @@ function getMessageFilePath(selectedProjectPath: string, pathPattern: string, lo
 		projectDirectory,
 		pathPattern.replace("{languageTag}", locale).replace("{locale}", locale)
 	)
-}
-
-async function readMessageFileKeys(messageFilePath: string) {
-	try {
-		const file = await readJsonObject(messageFilePath)
-		if (!file) return undefined
-		return new Set(Object.keys(file).filter((key) => key !== "$schema"))
-	} catch {
-		return undefined
-	}
 }
 
 async function readJsonObject(filePath: string) {
